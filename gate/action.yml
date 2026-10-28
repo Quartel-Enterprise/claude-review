@@ -1,0 +1,151 @@
+name: 'Claude review gate'
+description: "Waits for the opening Claude review of a pull request's commit, and tells whether the checks should run on it"
+
+# The first step of the job the pull request's check workflows start with: when the pull request has
+# just opened, or a draft was just marked ready for review, it waits for the review to finish on the
+# same commit before they run. The review applies its findings and pushes them as a commit of its
+# own, and running the checks on a commit about to be replaced would only have them run twice.
+# When the review pushed, the pull request's head is no longer this commit: proceed is 'false', and
+# the checks run on the new commit, whose push starts them again.
+#
+# The review's own push (claude[bot]'s fix commit) runs the gate too, waiting for that same review
+# run. On either commit, once the review ends, proceed is 'false' while a thread the review opened is
+# still unresolved, and open-threads says how many: the caller's next step fails then (its name is
+# the hold-step of the threads action), so the pull request shows why nothing ran instead of skipped
+# checks that look green. Resolving the threads without a push starts no workflow: the threads
+# action's rerun-held re-runs the held runs.
+#
+# A draft or a fork's pull request, which the review skips, passes right away. The step itself never
+# fails: a failed or cancelled review, one that outlasts the wait, or GitHub's API failing a few
+# times in a row lets the checks run.
+
+inputs:
+  review-workflow:
+    description: "The path of the workflow that runs the opening review."
+    required: false
+    default: '.github/workflows/claude-review.yml'
+  token:
+    description: 'A token that reads actions and pull requests.'
+    required: false
+    default: ${{ github.token }}
+outputs:
+  proceed:
+    description: "'false' when the checks run on a newer head instead, or are held for the review's open threads."
+    value: ${{ steps.review.outputs.proceed || steps.threads.outputs.proceed }}
+  open-threads:
+    description: "How many of the review's threads hold the checks; empty when none does."
+    value: ${{ steps.threads.outputs.open-threads }}
+runs:
+  using: "composite"
+  steps:
+    - id: review
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        GH_REPO: ${{ github.repository }}
+        REVIEW_WORKFLOW: ${{ inputs.review-workflow }}
+        REVIEWED: >-
+          ${{ !github.event.pull_request.draft &&
+          github.event.pull_request.head.repo.full_name == github.repository }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        # The fix commit's parent is the commit the review ran on.
+        REVIEWED_SHA: >-
+          ${{ github.event.action == 'synchronize' && github.event.before ||
+          github.event.pull_request.head.sha }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        EVENT_ACTION: ${{ github.event.action }}
+      run: |
+        proceed() {
+          echo "proceed=$1" >> "$GITHUB_OUTPUT"
+          exit 0
+        }
+        if [ "$REVIEWED" != true ]; then
+          proceed true
+        fi
+
+        # Every workflow of the same event is created together, so the review's run shows up within
+        # seconds; a minute of retries covers a slow API. A draft marked ready may already have review
+        # runs on its commit: the one its opening as a draft skipped, or an earlier review when it was
+        # marked ready before. Either would let the checks through before the new review ends, so on
+        # that event only a run created with this one counts (a re-run keeps its run's creation
+        # time), and never a skipped one.
+        since=""
+        if [ "$EVENT_ACTION" = ready_for_review ]; then
+          created=$(gh api "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID" --jq .created_at 2> /dev/null) || created=""
+          if [ -n "$created" ]; then
+            since=$(date -u -d "@$(($(date -d "$created" +%s) - 10))" +%Y-%m-%dT%H:%M:%SZ)
+          fi
+        fi
+        run=""
+        for _ in $(seq 1 6); do
+          run=$(gh api "repos/$GH_REPO/actions/runs?head_sha=$REVIEWED_SHA&event=pull_request&per_page=100" \
+            --jq "[.workflow_runs[] | select(.path == \"$REVIEW_WORKFLOW\" and .created_at >= \"$since\" and .conclusion != \"skipped\")] | first | .id // empty" \
+            2> /dev/null) || run=""
+          [ -n "$run" ] && break
+          sleep 10
+        done
+        if [ -z "$run" ]; then
+          echo "::notice::No review run on this commit, so the checks run without waiting for one."
+          proceed true
+        fi
+
+        # Once a minute: several workflows wait on the same review, all on GITHUB_TOKEN's 1,000
+        # requests an hour, and the review takes many minutes. Its fix commit is pushed seconds before
+        # it ends, so on that commit the wait is short and polled every 10 seconds. The deadline stays
+        # under a 45-minute job timeout, so a review stuck in the queue still lets the checks run.
+        interval=60
+        if [ "$EVENT_ACTION" = synchronize ]; then
+          interval=10
+        fi
+        deadline=$(($(date +%s) + 40 * 60))
+        failures=0
+        status=""
+        while [ "$(date +%s)" -lt "$deadline" ]; do
+          if status=$(gh api "repos/$GH_REPO/actions/runs/$run" --jq .status 2> /dev/null); then
+            failures=0
+            [ "$status" = completed ] && break
+          else
+            failures=$((failures + 1))
+            if [ "$failures" -ge 3 ]; then
+              echo "::warning::GitHub's API failed three times in a row, so the checks run without waiting for the review."
+              proceed true
+            fi
+          fi
+          sleep "$interval"
+        done
+        if [ "$status" != completed ]; then
+          echo "::warning::The review is still running after 40 minutes, so the checks run without waiting for it."
+          proceed true
+        fi
+
+        # The review pushes its fixes before its run completes, so a moved head is already visible.
+        head=$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER" --jq .head.sha 2> /dev/null) || head=""
+        if [ -n "$head" ] && [ "$head" != "$HEAD_SHA" ]; then
+          echo "::notice::The pull request's head moved to $head during the review, so the checks run there instead."
+          proceed false
+        fi
+
+        echo "count-threads=true" >> "$GITHUB_OUTPUT"
+
+    # The review posts its threads before its run completes, like its fixes.
+    - id: threads
+      if: steps.review.outputs.count-threads == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        GH_REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: |
+        if ! open=$("$GITHUB_ACTION_PATH/../threads/review_gate.sh" open-threads "$PR_NUMBER" --claude 2> /dev/null); then
+          echo "::warning::The review's threads couldn't be read, so the checks run without checking them."
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        if [ "$open" -gt 0 ]; then
+          {
+            echo "proceed=false"
+            echo "open-threads=$open"
+          } >> "$GITHUB_OUTPUT"
+        else
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+        fi

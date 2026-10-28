@@ -1,0 +1,62 @@
+name: 'Claude review threads'
+description: "Counts a pull request's unresolved review threads, or re-runs the checks the review gate held for them"
+
+# The workflows around the review gate (a label that re-runs the held checks, a merge that waits for
+# the threads) ask GitHub the same two questions as the gate itself. They go through review_gate.sh,
+# so all of them agree on which threads hold the checks and which runs were held.
+
+inputs:
+  command:
+    description: "'open-threads' to count the unresolved threads of pull-request, or 'rerun-held' to re-run the held runs of sha."
+    required: true
+  pull-request:
+    description: 'The pull request number, for open-threads.'
+    required: false
+    default: ''
+  claude-only:
+    description: "'true' to count only the threads the Claude review opened, for open-threads."
+    required: false
+    default: 'false'
+  sha:
+    description: 'The commit whose held runs to re-run, for rerun-held.'
+    required: false
+    default: ''
+  hold-step:
+    description: "The name of the caller's step that fails when the gate holds the checks, for rerun-held."
+    required: false
+    default: 'Hold for the open threads'
+  token:
+    description: 'A token that reads pull requests and, for rerun-held, writes actions.'
+    required: false
+    default: ${{ github.token }}
+outputs:
+  count:
+    description: 'How many threads are unresolved (open-threads), or how many runs were re-run (rerun-held).'
+    value: ${{ steps.run.outputs.count }}
+runs:
+  using: "composite"
+  steps:
+    - id: run
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        GH_REPO: ${{ github.repository }}
+        COMMAND: ${{ inputs.command }}
+        PR_NUMBER: ${{ inputs.pull-request }}
+        CLAUDE_ONLY: ${{ inputs.claude-only }}
+        SHA: ${{ inputs.sha }}
+        HOLD_STEP: ${{ inputs.hold-step }}
+      run: |
+        case "$COMMAND" in
+          open-threads)
+            args=(open-threads "$PR_NUMBER")
+            [ "$CLAUDE_ONLY" = true ] && args+=(--claude)
+            count=$("$GITHUB_ACTION_PATH/review_gate.sh" "${args[@]}")
+            ;;
+          rerun-held) count=$("$GITHUB_ACTION_PATH/review_gate.sh" rerun-held "$SHA") ;;
+          *)
+            echo "::error::Unknown command '$COMMAND': use open-threads or rerun-held."
+            exit 2
+            ;;
+        esac
+        echo "count=$count" >> "$GITHUB_OUTPUT"
