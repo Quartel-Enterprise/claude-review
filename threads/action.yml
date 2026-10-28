@@ -17,6 +17,10 @@ inputs:
     description: "'true' to count only the threads the Claude review opened, for open-threads."
     required: false
     default: 'false'
+  bot-login:
+    description: "The login of the bot user the review posts as: the review action's bot-login."
+    required: false
+    default: 'claude[bot]'
   sha:
     description: 'The commit whose held runs to re-run, for rerun-held.'
     required: false
@@ -44,6 +48,7 @@ runs:
         COMMAND: ${{ inputs.command }}
         PR_NUMBER: ${{ inputs.pull-request }}
         CLAUDE_ONLY: ${{ inputs.claude-only }}
+        BOT_LOGIN: ${{ inputs.bot-login }}
         SHA: ${{ inputs.sha }}
         HOLD_STEP: ${{ inputs.hold-step }}
       run: |

@@ -7,18 +7,22 @@
 # open-threads prints how many review threads of the pull request are unresolved; with --claude,
 # only the ones the Claude review opened. rerun-held re-runs every run on the commit whose gate held
 # its checks for those threads, and prints how many it re-ran. Both read GH_REPO and GH_TOKEN, and
-# exit non-zero when GitHub's API fails. rerun-held also reads HOLD_STEP, the name of the caller's
-# step that fails when the gate holds the checks.
+# exit non-zero when GitHub's API fails. open-threads also reads BOT_LOGIN, the bot user the review
+# posts as, and rerun-held HOLD_STEP, the name of the caller's step that fails when the gate holds
+# the checks.
 set -euo pipefail
 
 export HOLD_STEP="${HOLD_STEP:-Hold for the open threads}"
+export BOT_LOGIN="${BOT_LOGIN:-claude[bot]}"
 
 open_threads() {
   local pr=$1 filter='.' threads
   if [ "${2:-}" = --claude ]; then
-    # claude[bot]'s threads, or github-actions[bot]'s when the review's session couldn't post. GraphQL
-    # names bots without the [bot] suffix.
-    filter='select(.comments.nodes[0].author.login // "" | test("^(claude|github-actions)(\\[bot\\])?$"))'
+    # The review's bot user's threads, or github-actions[bot]'s when the review's session couldn't
+    # post. GraphQL names bots without the [bot] suffix, so the author's type tells a bot from a user
+    # of the same name.
+    filter='select(.comments.nodes[0].author // {} | .__typename == "Bot"
+      and (.login + "[bot]" == env.BOT_LOGIN or .login == "github-actions"))'
   fi
   # The $ names in the query are GraphQL variables.
   # shellcheck disable=SC2016
@@ -30,7 +34,7 @@ open_threads() {
       repository(owner: $owner, name: $name) {
         pullRequest(number: $number) {
           reviewThreads(first: 100, after: $endCursor) {
-            nodes { id isResolved comments(first: 1) { nodes { author { login } } } }
+            nodes { id isResolved comments(first: 1) { nodes { author { __typename login } } } }
             pageInfo { hasNextPage endCursor }
           }
         }

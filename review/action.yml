@@ -1,18 +1,19 @@
 name: 'Claude review'
-description: 'Reviews the pull request with the /code-review skill bundled with Claude Code, at high effort, optionally fixes the findings, and posts them as one review'
+description: 'Reviews the pull request with the /code-review skill bundled with Claude Code, optionally fixes the findings, and posts them as one review'
 
 # The review step only reviews: the findings come back as JSON in Claude's last message. A Stop hook
 # of the session (stop-hook.sh) then hands them to post-review.sh, which posts them as one pull
-# request review. The hook runs inside the session, so the review is posted as claude[bot], with the
-# Claude GitHub App's token the action gives the session and revokes when it ends: a step after the
-# action couldn't use it. When the hook didn't post (no token, a GitHub outage), the posting step
-# below posts the same findings with the workflow's token, as github-actions. The model posts nothing
-# itself: the skill's --comment flag posts one review per finding, each with its own notification,
-# and a script run by the model depends on a Bash allowlist the action didn't honour for it. The hook
-# and the scripts it runs are copied out of the action's own directory first, into a read-only
-# directory the session can't write: its Edit rule covers the checkout only, and none of the Bash
-# commands it is allowed writes a file (see the claude step). They come from the release the caller
-# pins, never from the pull request under review.
+# request review. The hook runs inside the session, so the review is posted as the App's bot user
+# (claude[bot], or bot-login with a github-token of your own App), with the App's token the action
+# gives the session and revokes when it ends: a step after the action couldn't use it. When the hook
+# didn't post (no token, a GitHub outage), the posting step below posts the same findings with the
+# workflow's token, as github-actions. The model posts nothing itself: the skill's --comment flag
+# posts one review per finding, each with its own notification, and a script run by the model
+# depends on a Bash allowlist the action didn't honour for it. The hook and the scripts it runs are
+# copied out of the action's own directory first, into a read-only directory the session can't
+# write: its Edit rule covers the checkout only, and none of the Bash commands it is allowed writes
+# a file (see the claude step). They come from the release the caller pins, never from the pull
+# request under review.
 #
 # With fix, the review also applies its findings to the working tree, and the hook commits them and
 # pushes the commit to the pull request's branch (commit-fixes.sh) before it posts: the review then
@@ -23,8 +24,37 @@ description: 'Reviews the pull request with the /code-review skill bundled with 
 
 inputs:
   oauth-token:
-    description: 'The CLAUDE_CODE_OAUTH_TOKEN secret.'
-    required: true
+    description: 'A Claude Code OAuth token (claude setup-token): the reviews count against that Claude subscription. Set this or anthropic-api-key.'
+    required: false
+    default: ''
+  anthropic-api-key:
+    description: 'An Anthropic API key: the reviews are billed per token. Set this or oauth-token.'
+    required: false
+    default: ''
+  model:
+    description: "The model of the review: an alias (opus, sonnet, haiku) or a full model id."
+    required: false
+    default: 'opus'
+  effort:
+    description: "The /code-review skill's effort level: low, medium, high, xhigh or max. Higher finds more, some of it less certain, and costs more."
+    required: false
+    default: 'high'
+  max-findings:
+    description: "How many findings the review reports at most, most severe first: 'all' or a number."
+    required: false
+    default: 'all'
+  github-token:
+    description: "A token of your own GitHub App, to review as that App instead of the Claude GitHub App. Set bot-login and bot-id to its bot user too."
+    required: false
+    default: ''
+  bot-login:
+    description: "The login of the GitHub App's bot user the review posts as."
+    required: false
+    default: 'claude[bot]'
+  bot-id:
+    description: "The user id of that bot user (gh api 'users/<bot-login>' --jq .id), which the fix commit's author email carries so GitHub links the commit to it."
+    required: false
+    default: '209825114'
   instructions:
     description: 'Extra instructions appended to the review prompt.'
     required: false
@@ -48,6 +78,45 @@ inputs:
 runs:
   using: "composite"
   steps:
+    # The inputs go into the session's command line and the skill's arguments, so each is checked
+    # against what it may hold before anything runs. The sandbox step installs packages with apt-get,
+    # which only an Ubuntu runner has.
+    - name: Check the inputs
+      shell: bash
+      env:
+        HAS_OAUTH_TOKEN: ${{ inputs.oauth-token != '' }}
+        HAS_API_KEY: ${{ inputs.anthropic-api-key != '' }}
+        MODEL: ${{ inputs.model }}
+        EFFORT: ${{ inputs.effort }}
+        MAX_FINDINGS: ${{ inputs.max-findings }}
+        BOT_LOGIN: ${{ inputs.bot-login }}
+        BOT_ID: ${{ inputs.bot-id }}
+        HAS_GITHUB_TOKEN: ${{ inputs.github-token != '' }}
+      run: |
+        errors=0
+        error() {
+          echo "::error::$*"
+          errors=$((errors + 1))
+        }
+        if [ "$HAS_OAUTH_TOKEN" = "$HAS_API_KEY" ]; then
+          error "Set exactly one of oauth-token and anthropic-api-key."
+        fi
+        [[ "$MODEL" =~ ^[A-Za-z0-9._:-]+(\[[0-9a-z]+\])?$ ]] || error "model '$MODEL' isn't a model alias or id."
+        case "$EFFORT" in
+          low | medium | high | xhigh | max) ;;
+          *) error "effort '$EFFORT' isn't one of low, medium, high, xhigh and max." ;;
+        esac
+        [[ "$MAX_FINDINGS" =~ ^(all|[1-9][0-9]*)$ ]] || error "max-findings '$MAX_FINDINGS' isn't 'all' or a number."
+        [[ "$BOT_LOGIN" =~ ^[A-Za-z0-9-]+\[bot\]$ ]] || error "bot-login '$BOT_LOGIN' isn't a bot user's login, such as claude[bot]."
+        [[ "$BOT_ID" =~ ^[0-9]+$ ]] || error "bot-id '$BOT_ID' isn't a user id."
+        if [ "$HAS_GITHUB_TOKEN" = true ] && [ "$BOT_LOGIN" = "claude[bot]" ]; then
+          echo "::warning::github-token is set but bot-login is still claude[bot]: set your App's bot user, or the review won't recognise its own earlier comments."
+        fi
+        if [ "$RUNNER_OS" != Linux ] || ! command -v apt-get > /dev/null; then
+          error "The review runs on an Ubuntu runner only: its sandbox is installed with apt-get."
+        fi
+        [ "$errors" -eq 0 ] || exit 1
+
     # Agent memories live in a private repository when the reviewed one is public. Only the files
     # memory-files names reach the runner: a memory that holds figures or ids a comment must never
     # repeat stays out. Without the key, or when the checkout fails, the review still runs, only
@@ -111,14 +180,15 @@ runs:
         GH_TOKEN: ${{ github.token }}
         GH_REPO: ${{ github.repository }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
+        BOT_LOGIN: ${{ inputs.bot-login }}
       run: |
         comments=$(
           gh api --paginate "repos/$GH_REPO/pulls/$PR_NUMBER/comments" \
-            --jq '.[] | select(.user.login == "github-actions[bot]" or .user.login == "claude[bot]")
+            --jq '.[] | select(.user.login == "github-actions[bot]" or .user.login == env.BOT_LOGIN)
               | "- \(.path):\(.line // .original_line): \(.body | gsub("\\s+"; " ") | .[0:300])"' \
             || echo "::warning::The earlier inline comments couldn't be read, so the review isn't told about them." >&2
           gh api --paginate "repos/$GH_REPO/pulls/$PR_NUMBER/reviews" \
-            --jq '.[] | select(.user.login == "github-actions[bot]" or .user.login == "claude[bot]")
+            --jq '.[] | select(.user.login == "github-actions[bot]" or .user.login == env.BOT_LOGIN)
               | .body | select(test("^### Code review\\s+[0-9]+ finding"))
               | gsub("\\s*<!-- claude-review run [^>]*-->"; "")
               | split("\n\n")[1:]
@@ -231,10 +301,12 @@ runs:
         FIX: ${{ inputs.fix }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         WORKSPACE: ${{ github.workspace }}
+        EFFORT: ${{ inputs.effort }}
+        MAX_FINDINGS: ${{ inputs.max-findings }}
       run: |
         if [ "$FIX" = true ]; then
           {
-            echo "arguments=high $PR_NUMBER --fix --max-findings all"
+            echo "arguments=$EFFORT $PR_NUMBER --fix --max-findings $MAX_FINDINGS"
             echo "tools=Task,Bash,Read,Edit,Grep,Glob,Skill"
             echo "allowed=,Edit(/$WORKSPACE/**)"
             echo "denied=Write,NotebookEdit,Edit(/$WORKSPACE/.git/**),Edit(/$WORKSPACE/.github/**),Edit(/$WORKSPACE/.claude/**),Edit(/$WORKSPACE/.agent-memory/**),"
@@ -255,7 +327,7 @@ runs:
           } >> "$GITHUB_OUTPUT"
         else
           {
-            echo "arguments=high $PR_NUMBER --max-findings all"
+            echo "arguments=$EFFORT $PR_NUMBER --max-findings $MAX_FINDINGS"
             echo "tools=Task,Bash,Read,Grep,Glob,Skill"
             echo "allowed="
             echo "denied=Write,Edit,NotebookEdit,"
@@ -267,11 +339,15 @@ runs:
         fi
 
     # The same review as a local /code-review before the pull request opens: the skill bundled with
-    # Claude Code at high effort, on Opus. The model invokes the skill itself, with the level, the pull
-    # request number, --max-findings and, with fix, --fix as its only arguments: put on the skill's
-    # command line, the instructions below would become part of its target. Without --max-findings all, the skill keeps only the ten most severe
-    # findings, so a large pull request needed a review on request after every round of fixes to see
-    # the rest (one took 27).
+    # Claude Code, at the effort and on the model the caller picks (high, on Opus, by default). The
+    # model invokes the skill itself, with the level, the pull request number, --max-findings and,
+    # with fix, --fix as its only arguments: put on the skill's command line, the instructions below
+    # would become part of its target. Without --max-findings, the skill keeps only the ten most
+    # severe findings, so a large pull request needed a review on request after every round of fixes
+    # to see the rest (one took 27): the default is all of them.
+    #
+    # bot_name and bot_id make the fix commit's author the bot user the review posts as: without
+    # bot_id, the action's default is github-actions[bot]'s id, and GitHub linked the commit to it.
     #
     # The skill's findings carry no severity and no fix, so the model adds both after it returns: the
     # severity labels each comment, and a fix that only replaces the commented lines becomes a GitHub
@@ -337,12 +413,19 @@ runs:
         fi
 
     - id: claude
-      uses: anthropics/claude-code-action@v1
+      # An exact release: v1 moves, and would change what a pinned release of this action does.
+      uses: anthropics/claude-code-action@d70510b174a1244958df0b03166a54912811f3e6 # v1.0.264
       env:
         CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1"
         CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
+        # For the Stop hook's post-review.sh.
+        BOT_LOGIN: ${{ inputs.bot-login }}
       with:
         claude_code_oauth_token: ${{ inputs.oauth-token }}
+        anthropic_api_key: ${{ inputs.anthropic-api-key }}
+        github_token: ${{ inputs.github-token }}
+        bot_name: ${{ inputs.bot-login }}
+        bot_id: ${{ inputs.bot-id }}
         settings: |
           {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "${{ steps.tools.outputs.dir }}/bash-guard.sh ${{ steps.tools.outputs.state }}"}]}], "Stop": [{"hooks": [{"type": "command", "command": "${{ steps.tools.outputs.dir }}/stop-hook.sh ${{ steps.tools.outputs.state }} ${{ steps.tools.outputs.started }} ${{ inputs.fix }}", "timeout": 600}]}]}}
         prompt: |
@@ -388,7 +471,7 @@ runs:
           ${{ steps.earlier.outputs.text }}
           ${{ inputs.instructions }}
         claude_args: >-
-          --model opus
+          --model ${{ inputs.model }}
           --tools "${{ steps.mode.outputs.tools }}"
           --allowedTools "Skill(code-review),Read(/${{ github.workspace }}/**),Read(/${{ steps.tools.outputs.reviewed }}/**),Read(~/.claude/projects/**),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr list:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh search:*),Bash(git status:*),Bash(git branch --show-current)${{ steps.mode.outputs.allowed }}"
           --disallowedTools "${{ steps.mode.outputs.denied }}Read(//proc/**),Read(//sys/**),Read(//etc/**),Read(/${{ runner.temp }}/**),Read(//tmp/**),Read(/${{ github.workspace }}/.git/**),Read(~/.ssh/**),Read(~/.gnupg/**),Read(~/.config/**),Read(~/.docker/**),Read(~/.gradle/**),Read(~/.m2/**),Read(~/.git-credentials),Read(~/.gitconfig),Read(~/.netrc),Read(~/.npmrc),Read(~/.claude.json),Read(~/.claude/.credentials.json),Read(~/actions-runner/**),Read(~/runners/**),ScheduleWakeup,Monitor,SendMessage"
@@ -419,6 +502,7 @@ runs:
         TOOLS: ${{ steps.tools.outputs.dir }}
         STATE: ${{ steps.tools.outputs.state }}
         STARTED: ${{ steps.tools.outputs.started }}
+        BOT_LOGIN: ${{ inputs.bot-login }}
       run: |
         # The log quotes what the hook found, so it is printed through the same mask as the review.
         if [ -f "$STATE/.hook-log" ]; then

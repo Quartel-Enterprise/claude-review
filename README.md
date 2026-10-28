@@ -1,27 +1,34 @@
 # claude-review
 
 GitHub Actions that review a pull request with Claude Code, optionally fix what the review found,
-and hold the pull request's checks until the review ends and its threads are resolved. Shared by
-the Quare apps, so a fix reaches all of them through a release.
+and hold the pull request's checks until the review ends and its threads are resolved. Only
+`review` is needed for a review on every pull request; `gate` and `threads` are for repositories
+that want their checks to run once, after the review's fixes.
 
 | Action | What it does |
 | --- | --- |
-| `review` | Runs the `/code-review` skill bundled with Claude Code at high effort, on Opus, optionally with `--fix`, and posts the findings as one pull request review |
+| `review` | Runs the `/code-review` skill bundled with Claude Code (high effort on Opus by default), optionally with `--fix`, and posts the findings as one pull request review |
 | `gate` | Waits for the opening review of the pull request's commit, and tells the check workflows whether to run |
 | `threads` | Counts the review's unresolved threads, or re-runs the checks the gate held for them |
 
-Pin an exact release in every `uses:` (`@1.0.1`) and bump all of them together: the gate and the
+Pin an exact release in every `uses:` (`@1.1.0`) and bump all of them together: the gate and the
 threads action have to agree on which threads hold the checks and which step name marks a hold.
 Releases are immutable, so a tag always means the same code. A check in the consuming repository
 that fails when its refs differ keeps a partial bump from merging.
 
 ## Setup
 
-- The `CLAUDE_CODE_OAUTH_TOKEN` secret, created with `claude setup-token`: the reviews count against
-  that Claude subscription instead of being billed per token. When it expires or is revoked, the run
-  fails on authentication: create a new one and update the secret.
-- The Claude GitHub App installed on the repository: the review posts as `claude[bot]`, and its fix
-  commit is pushed with the App's token, which starts the pull request's workflows on it.
+- One of two secrets for Claude:
+  - `CLAUDE_CODE_OAUTH_TOKEN`, created with `claude setup-token`, passed as `oauth-token`: the reviews
+    count against that Claude subscription. When it expires or is revoked, the run fails on
+    authentication: create a new one and update the secret.
+  - `ANTHROPIC_API_KEY`, passed as `anthropic-api-key`: the reviews are billed per token to that
+    API account.
+- The [Claude GitHub App](https://github.com/apps/claude) installed on the repository: the review
+  posts as `claude[bot]`, and its fix commit is pushed with the App's token, which starts the pull
+  request's workflows on it. To review as an App of your own instead, see
+  [Your own GitHub App](#your-own-github-app).
+- An Ubuntu runner (`ubuntu-latest`): the review's sandbox is installed with `apt-get`.
 
 ## The review
 
@@ -60,7 +67,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: Quartel-Enterprise/claude-review/review@1.0.1
+      - uses: Quartel-Enterprise/claude-review/review@1.1.0
         with:
           oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           fix: 'true'
@@ -68,9 +75,13 @@ jobs:
 
 | Input | |
 | --- | --- |
-| `oauth-token` | The `CLAUDE_CODE_OAUTH_TOKEN` secret. Required |
+| `oauth-token`, `anthropic-api-key` | A Claude Code OAuth token or an Anthropic API key. Set exactly one |
+| `model` | An alias (`opus`, `sonnet`, `haiku`) or a full model id. `opus` by default |
+| `effort` | The `/code-review` skill's level: `low`, `medium`, `high`, `xhigh` or `max`. `high` by default. Higher levels find more, some of it less certain, and cost more |
+| `max-findings` | `all` (the default) or a number: the review keeps the most severe ones |
 | `fix` | `'true'` to apply the findings and push them as a commit to the pull request's branch |
 | `instructions` | Extra instructions appended to the prompt, e.g. for a review on request |
+| `github-token`, `bot-login`, `bot-id` | Review as your own GitHub App: see below |
 | `memory-repository`, `memory-ssh-key`, `memory-files` | A private repository of agent memories, a read-only deploy key of it, and the sparse-checkout pattern of the files to read. `memory-files` has no default: without it the review runs without memories and warns, so a forgotten input never sends every memory to the runner |
 
 The workflow that calls the action stays in each repository: `claude-code-action` refuses to run
@@ -97,6 +108,41 @@ when the branch moved during the review: the push is never forced. The fixed fin
 listed in the review's body, under the fix commit, and open no thread. The fix commit isn't built
 before the push, so a fix that breaks the build shows up in its checks.
 
+A cheaper review, for a repository that wants a quick look rather than a thorough one:
+
+```yaml
+      - uses: Quartel-Enterprise/claude-review/review@1.1.0
+        with:
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          model: sonnet
+          effort: medium
+          max-findings: '10'
+```
+
+### Your own GitHub App
+
+Without `github-token`, the review exchanges the workflow's OIDC token for one of the Claude GitHub
+App. To post and push as an App of your own, mint its installation token in an earlier step and
+name its bot user:
+
+```yaml
+      - id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.REVIEW_APP_ID }}
+          private-key: ${{ secrets.REVIEW_APP_PRIVATE_KEY }}
+      - uses: Quartel-Enterprise/claude-review/review@1.1.0
+        with:
+          oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github-token: ${{ steps.app.outputs.token }}
+          bot-login: my-review-app[bot]
+          bot-id: '123456789' # gh api 'users/my-review-app[bot]' --jq .id
+```
+
+The App needs read and write access to contents and pull requests. `bot-id` goes in the fix
+commit's author email, which is how GitHub links the commit to the bot. Pass the same `bot-login`
+to `gate` and `threads`, and use it in the check workflows' `sender.login` condition below.
+
 ### Agent memories
 
 When the reviewed repository is public and its conventions live in a private repository of agent
@@ -107,7 +153,7 @@ or when the checkout fails, the review runs without them and the run shows a war
 
 ### Security
 
-The runner's environment holds the Claude OAuth token and the GitHub tokens, and a prompt injection
+The runner's environment holds the Claude token (OAuth or API key) and the GitHub tokens, and a prompt injection
 in a diff could ask the review to quote one in a public comment. So:
 
 - The session reads files only through the Read, Grep and Glob tools (`--tools` names them, since
@@ -122,7 +168,7 @@ in a diff could ask the review to quote one in a public comment. So:
   they are given. A PreToolUse hook (`bash-guard.sh`) lets through only one plain line of those
   commands, with no quoting, expansion, pipe or redirection, and none of `gh`'s `--jq`, `-q`,
   `--template` and `-t`.
-- `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` keeps the Claude OAuth token out of every Bash command's and
+- `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` keeps the Claude token out of every Bash command's and
   hook's environment, and runs every Bash command in Claude Code's sandbox (the action installs
   bubblewrap and socat for it).
 - The hook and its scripts are copied from the action's directory into a read-only one before the
@@ -168,8 +214,9 @@ jobs:
       proceed: ${{ steps.gate.outputs.proceed }}
     steps:
       - id: gate
-        uses: Quartel-Enterprise/claude-review/gate@1.0.1
+        uses: Quartel-Enterprise/claude-review/gate@1.1.0
         with:
+          # bot-login: my-review-app[bot] # with your own GitHub App
           # A few minutes under timeout-minutes, so a stuck review lets the checks run.
           wait-minutes: 40
       # The step's name is what the threads action's rerun-held looks for.
@@ -216,8 +263,8 @@ minute, or every 10 seconds on the fix commit, which is pushed seconds before th
 draft marked ready, only a review run the same event created counts, since the commit may already
 have a skipped or completed one. When the head moved meanwhile, `proceed` is `false`: the push
 started the checks again on the new commit. Once the review ended, `proceed` is `false` and
-`open-threads` says how many while a thread the review opened (`claude[bot]`'s, or
-`github-actions[bot]`'s when the fallback step posted) is unresolved: the author is about to push the
+`open-threads` says how many while a thread the review opened (`bot-login`'s, `claude[bot]` by
+default, or `github-actions[bot]`'s when the fallback step posted) is unresolved: the author is about to push the
 fixes, and that push runs the checks. A draft or a fork passes right away, and so does a failed or
 cancelled review, GitHub's API failing three times in a row, or a review still running after
 `wait-minutes` (40 by default).
@@ -229,22 +276,27 @@ or a merge-when-green workflow once every conversation is resolved.
 
 ```yaml
 - id: open
-  uses: Quartel-Enterprise/claude-review/threads@1.0.1
+  uses: Quartel-Enterprise/claude-review/threads@1.1.0
   with:
     command: open-threads
     pull-request: ${{ github.event.pull_request.number }}
     claude-only: 'true'
 - if: steps.open.outputs.count == '0'
-  uses: Quartel-Enterprise/claude-review/threads@1.0.1
+  uses: Quartel-Enterprise/claude-review/threads@1.1.0
   with:
     command: rerun-held
     sha: ${{ github.event.pull_request.head.sha }}
 ```
 
-`rerun-held` needs `actions: write`. It re-runs every failed run of the commit whose `hold-step`
+With your own GitHub App, pass its `bot-login` to `open-threads` too. `rerun-held` needs
+`actions: write`. It re-runs every failed run of the commit whose `hold-step`
 (`Hold for the open threads` by default) failed, so no workflow has to list the gated ones.
 
 ## Development
 
-`lint.yml` runs actionlint and shellcheck. A change ships as a release whose tag is the version,
-then a bump of every `uses:` in the apps.
+`scripts/lint.sh` runs what `lint.yml` runs: shellcheck on the scripts and on every action's `run`
+blocks, then actionlint. A change ships as a release whose tag is the version (immutable releases),
+then each repository bumps every `uses:` to it together.
+
+`review` pins `anthropics/claude-code-action` to a commit, so a release of this repository always
+runs the same action: bump it here, in a release of its own.

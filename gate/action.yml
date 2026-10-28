@@ -8,7 +8,7 @@ description: "Waits for the opening Claude review of a pull request's commit, an
 # When the review pushed, the pull request's head is no longer this commit: proceed is 'false', and
 # the checks run on the new commit, whose push starts them again.
 #
-# The review's own push (claude[bot]'s fix commit) runs the gate too, waiting for that same review
+# The review's own push (its bot user's fix commit) runs the gate too, waiting for that same review
 # run. On either commit, once the review ends, proceed is 'false' while a thread the review opened is
 # still unresolved, and open-threads says how many: the caller's next step fails then (its name is
 # the hold-step of the threads action), so the pull request shows why nothing ran instead of skipped
@@ -28,6 +28,10 @@ inputs:
     description: "How long to wait for the review before letting the checks run. Keep it a few minutes under the job's timeout-minutes, or a stuck review gets the job cancelled instead."
     required: false
     default: '40'
+  bot-login:
+    description: "The login of the bot user the review posts as and pushes its fixes as: the review action's bot-login."
+    required: false
+    default: 'claude[bot]'
   token:
     description: 'A token that reads actions and pull requests.'
     required: false
@@ -141,6 +145,7 @@ runs:
         GH_TOKEN: ${{ inputs.token }}
         GH_REPO: ${{ github.repository }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
+        BOT_LOGIN: ${{ inputs.bot-login }}
       run: |
         if ! open=$("$GITHUB_ACTION_PATH/../threads/review_gate.sh" open-threads "$PR_NUMBER" --claude 2> /dev/null); then
           echo "::warning::The review's threads couldn't be read, so the checks run without checking them."
