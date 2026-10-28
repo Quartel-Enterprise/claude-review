@@ -12,7 +12,8 @@
 # The second form only looks for a review this script posted in the same workflow run, on any commit
 # (the one test the hook and the action's posting step share), and prints its url, exiting 1 when
 # there is none and 2 when GitHub couldn't be read. Each review carries its run in a hidden comment;
-# outside a workflow run, a review since the given time counts.
+# outside a workflow run, a review since the given time counts. BOT_LOGIN names the App's bot user
+# the hook posts as (claude[bot] by default); the posting step posts as github-actions[bot].
 #
 # The objects are the ones the /code-review skill returns, plus what the review step adds to them:
 # "severity" (must-fix, should-fix or nitpick) labels the comment and orders the findings, "fix" says
@@ -65,6 +66,7 @@ case "${1:-}" in
 esac
 pr=$1
 repo=${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is not set}
+export BOT_LOGIN="${BOT_LOGIN:-claude[bot]}"
 run_url=${RUN_URL:-${GITHUB_SERVER_URL:-}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID:-}}
 [ -n "${GITHUB_RUN_ID:-}" ] || run_url=""
 head_sha=${PR_HEAD_SHA:-}
@@ -88,7 +90,7 @@ already_posted() {
   local url
   url=$(SINCE="$1" gh api --paginate "repos/$repo/pulls/$pr/reviews" \
     --jq '.[] | select((.body | startswith("### Code review"))
-      and (.user.login == "claude[bot]" or .user.login == "github-actions[bot]")
+      and (.user.login == env.BOT_LOGIN or .user.login == "github-actions[bot]")
       and (if env.RUN_TAG != "" then (.body | contains(env.RUN_TAG)) else .submitted_at >= env.SINCE end))
       | .html_url' 2> /dev/null | tail -1) || return 2
   [ -n "$url" ] && echo "$url"
