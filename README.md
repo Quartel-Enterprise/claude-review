@@ -10,8 +10,10 @@ the Quare apps, so a fix reaches all of them through a release.
 | `gate` | Waits for the opening review of the pull request's commit, and tells the check workflows whether to run |
 | `threads` | Counts the review's unresolved threads, or re-runs the checks the gate held for them |
 
-Pin an exact release in every `uses:` (`@1.0.0`) and bump all of them together. Releases are
-immutable, so a tag always means the same code.
+Pin an exact release in every `uses:` (`@1.0.1`) and bump all of them together: the gate and the
+threads action have to agree on which threads hold the checks and which step name marks a hold.
+Releases are immutable, so a tag always means the same code. A check in the consuming repository
+that fails when its refs differ keeps a partial bump from merging.
 
 ## Setup
 
@@ -58,7 +60,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: Quartel-Enterprise/claude-review/review@1.0.0
+      - uses: Quartel-Enterprise/claude-review/review@1.0.1
         with:
           oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           fix: 'true'
@@ -69,7 +71,7 @@ jobs:
 | `oauth-token` | The `CLAUDE_CODE_OAUTH_TOKEN` secret. Required |
 | `fix` | `'true'` to apply the findings and push them as a commit to the pull request's branch |
 | `instructions` | Extra instructions appended to the prompt, e.g. for a review on request |
-| `memory-repository`, `memory-ssh-key`, `memory-files` | A private repository of agent memories, a read-only deploy key of it, and the sparse-checkout pattern of the files to read (`*.md` by default) |
+| `memory-repository`, `memory-ssh-key`, `memory-files` | A private repository of agent memories, a read-only deploy key of it, and the sparse-checkout pattern of the files to read. `memory-files` has no default: without it the review runs without memories and warns, so a forgotten input never sends every memory to the runner |
 
 The workflow that calls the action stays in each repository: `claude-code-action` refuses to run
 when the pull request changes the workflow file that started it, so a change to it can only be tried
@@ -166,7 +168,10 @@ jobs:
       proceed: ${{ steps.gate.outputs.proceed }}
     steps:
       - id: gate
-        uses: Quartel-Enterprise/claude-review/gate@1.0.0
+        uses: Quartel-Enterprise/claude-review/gate@1.0.1
+        with:
+          # A few minutes under timeout-minutes, so a stuck review lets the checks run.
+          wait-minutes: 40
       # The step's name is what the threads action's rerun-held looks for.
       - name: Hold for the open threads
         if: steps.gate.outputs.open-threads != ''
@@ -214,8 +219,8 @@ started the checks again on the new commit. Once the review ended, `proceed` is 
 `open-threads` says how many while a thread the review opened (`claude[bot]`'s, or
 `github-actions[bot]`'s when the fallback step posted) is unresolved: the author is about to push the
 fixes, and that push runs the checks. A draft or a fork passes right away, and so does a failed or
-cancelled review, GitHub's API failing three times in a row, or a review still running after 40
-minutes.
+cancelled review, GitHub's API failing three times in a row, or a review still running after
+`wait-minutes` (40 by default).
 
 ## The threads
 
@@ -224,13 +229,13 @@ or a merge-when-green workflow once every conversation is resolved.
 
 ```yaml
 - id: open
-  uses: Quartel-Enterprise/claude-review/threads@1.0.0
+  uses: Quartel-Enterprise/claude-review/threads@1.0.1
   with:
     command: open-threads
     pull-request: ${{ github.event.pull_request.number }}
     claude-only: 'true'
 - if: steps.open.outputs.count == '0'
-  uses: Quartel-Enterprise/claude-review/threads@1.0.0
+  uses: Quartel-Enterprise/claude-review/threads@1.0.1
   with:
     command: rerun-held
     sha: ${{ github.event.pull_request.head.sha }}

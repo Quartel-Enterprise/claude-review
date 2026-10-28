@@ -38,9 +38,9 @@ inputs:
     required: false
     default: ''
   memory-files:
-    description: "The files of memory-repository the review reads, as a sparse-checkout pattern: only conventions, since the review may paraphrase them in public comments."
+    description: "The files of memory-repository the review reads, as a sparse-checkout pattern: only conventions, since the review may paraphrase them in public comments. Required with memory-repository: there is no default, so no caller sends every memory by forgetting it."
     required: false
-    default: '*.md'
+    default: ''
   fix:
     description: "'true' to apply the findings and push them as a commit to the pull request's branch."
     required: false
@@ -53,7 +53,7 @@ runs:
     # repeat stays out. Without the key, or when the checkout fails, the review still runs, only
     # without them.
     - id: memory
-      if: inputs.memory-repository != '' && inputs.memory-ssh-key != ''
+      if: inputs.memory-repository != '' && inputs.memory-ssh-key != '' && inputs.memory-files != ''
       continue-on-error: true
       uses: actions/checkout@v6
       with:
@@ -76,6 +76,10 @@ runs:
         MEMORY_FILES: ${{ inputs.memory-files }}
       run: |
         [ -n "$MEMORY_REPOSITORY" ] || exit 0
+        if [ -z "$MEMORY_FILES" ]; then
+          echo "::warning::memory-repository is set without memory-files, so the review runs without the agent memories."
+          exit 0
+        fi
         if [ "$MEMORY_OUTCOME" != success ]; then
           echo "::warning::The agent memories weren't checked out, so the review runs without them."
           exit 0
