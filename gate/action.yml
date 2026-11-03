@@ -94,6 +94,15 @@ runs:
           sleep 10
         done
         if [ -z "$run" ]; then
+          # A review-workflow that names no workflow of the repository finds no run on any commit, and
+          # would let every check through with only the notice below. The Actions API lists the
+          # workflows with the gate's actions: read, where the file's contents would need contents:
+          # read; a failed listing warns nothing.
+          if known=$(gh api --paginate "repos/$GH_REPO/actions/workflows?per_page=100" \
+            --jq ".workflows[] | select(.path == \"$REVIEW_WORKFLOW\" and .state != \"deleted\") | .id" \
+            2> /dev/null) && [ -z "$known" ]; then
+            echo "::warning::The gate's review-workflow input is $REVIEW_WORKFLOW, but this repository has no workflow at that path, so the gate never waits for a review. Set review-workflow to the path of the workflow that runs the review."
+          fi
           echo "::notice::No review run on this commit, so the checks run without waiting for one."
           proceed true
         fi
