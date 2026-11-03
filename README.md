@@ -348,6 +348,9 @@ request shows a failed `review-gate` check saying why, rather than skipped check
 The gate never fails on its own. A draft or a fork passes right away, and so does a commit with no
 review run after a minute (a skipped review, a Dependabot pull request), a failed or cancelled
 review, GitHub's API failing three times in a row, or a review still running after `wait-minutes`.
+When the review's workflow has another path than `review-workflow`, the gate finds no run on any
+commit and lets every check through: it then warns that the repository has no workflow at that path,
+so set `review-workflow` to the path of yours.
 
 | Input | Default | |
 | --- | --- | --- |
