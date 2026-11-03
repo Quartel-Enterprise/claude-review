@@ -103,7 +103,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: Quartel-Enterprise/claude-review/review@1.1.0
+      - uses: Quartel-Enterprise/claude-review/review@1.2.0
         with:
           oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           fix: 'true'
@@ -145,7 +145,7 @@ before the push, so a fix that breaks the build shows up in its checks.
 A cheaper review, for a repository that wants a quick look rather than a thorough one:
 
 ```yaml
-      - uses: Quartel-Enterprise/claude-review/review@1.1.0
+      - uses: Quartel-Enterprise/claude-review/review@1.2.0
         with:
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
           model: sonnet
@@ -173,7 +173,7 @@ name its bot user:
         with:
           client-id: ${{ vars.REVIEW_APP_CLIENT_ID }}
           private-key: ${{ secrets.REVIEW_APP_PRIVATE_KEY }}
-      - uses: Quartel-Enterprise/claude-review/review@1.1.0
+      - uses: Quartel-Enterprise/claude-review/review@1.2.0
         with:
           oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github-token: ${{ steps.app.outputs.token }}
@@ -285,7 +285,7 @@ jobs:
       proceed: ${{ steps.gate.outputs.proceed }}
     steps:
       - id: gate
-        uses: Quartel-Enterprise/claude-review/gate@1.1.0
+        uses: Quartel-Enterprise/claude-review/gate@1.2.0
         with:
           # bot-login: my-review-app[bot] # with your own GitHub App
           # A few minutes under timeout-minutes, so a stuck review lets the checks run.
@@ -392,13 +392,13 @@ jobs:
       pull-requests: write
     steps:
       - id: open
-        uses: Quartel-Enterprise/claude-review/threads@1.1.0
+        uses: Quartel-Enterprise/claude-review/threads@1.2.0
         with:
           command: open-threads
           pull-request: ${{ github.event.pull_request.number }}
           claude-only: 'true'
       - if: steps.open.outcome == 'success' && steps.open.outputs.count == '0'
-        uses: Quartel-Enterprise/claude-review/threads@1.1.0
+        uses: Quartel-Enterprise/claude-review/threads@1.2.0
         with:
           command: rerun-held
           sha: ${{ github.event.pull_request.head.sha }}
@@ -432,7 +432,7 @@ ones. With your own GitHub App, pass its `bot-login` to `open-threads` too.
 
 ## Versions
 
-Pin an exact release in every `uses:` (`@1.1.0`, the latest
+Pin an exact release in every `uses:` (`@1.2.0`, the latest
 [release](https://github.com/Quartel-Enterprise/claude-review/releases)) and bump all of them
 together: the gate and the threads action have to agree on which threads hold the checks and which
 step name marks a hold. Releases are immutable, so a tag always means the same code. A check in your
