@@ -117,12 +117,52 @@ runs:
         fi
         [ "$errors" -eq 0 ] || exit 1
 
+    # GitHub starts no pull_request workflow while the pull request conflicts with its base, so one
+    # opened (or marked ready) with a conflict gets no review on that event. A caller that also runs
+    # on synchronize gets it on the push that solves the conflict: on a push, the review runs only
+    # when the calling workflow has no earlier run since the pull request opened (any run counts,
+    # even a skipped one, such as a draft's opening), and never on the bot user's own fix commit.
+    # Every later push ends here, green, without reviewing. A failed read skips the review too, so a
+    # GitHub error never reviews every push.
+    - id: event
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+        EVENT_ACTION: ${{ github.event.action }}
+        SENDER: ${{ github.event.sender.login }}
+        BOT_LOGIN: ${{ inputs.bot-login }}
+        HEAD_REF: ${{ github.head_ref }}
+        OPENED_AT: ${{ github.event.pull_request.created_at }}
+      run: |
+        review() {
+          echo "review=$1" >> "$GITHUB_OUTPUT"
+          exit 0
+        }
+        [ "$EVENT_ACTION" = synchronize ] || review true
+        if [ "$SENDER" = "$BOT_LOGIN" ]; then
+          echo "::notice::A push by $BOT_LOGIN, the review's own fix commit, isn't reviewed."
+          review false
+        fi
+        if ! workflow=$(gh api "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID" --jq .workflow_id) ||
+          ! earlier=$(gh api "repos/$GH_REPO/actions/workflows/$workflow/runs?branch=$HEAD_REF&event=pull_request&created=%3E%3D$OPENED_AT&per_page=100" \
+            --jq "[.workflow_runs[] | select(.id != $GITHUB_RUN_ID)] | length"); then
+          echo "::warning::This workflow's earlier runs couldn't be read (does the job have actions: read?), so this push isn't reviewed."
+          review false
+        fi
+        if [ "$earlier" -gt 0 ]; then
+          echo "::notice::The pull request was reviewed when it opened, so this push isn't."
+          review false
+        fi
+        echo "::notice::No run of this workflow since the pull request opened, which GitHub skips while it conflicts with its base, so this push is reviewed."
+        review true
+
     # Agent memories live in a private repository when the reviewed one is public. Only the files
     # memory-files names reach the runner: a memory that holds figures or ids a comment must never
     # repeat stays out. Without the key, or when the checkout fails, the review still runs, only
     # without them.
     - id: memory
-      if: inputs.memory-repository != '' && inputs.memory-ssh-key != '' && inputs.memory-files != ''
+      if: steps.event.outputs.review == 'true' && inputs.memory-repository != '' && inputs.memory-ssh-key != '' && inputs.memory-files != ''
       continue-on-error: true
       uses: actions/checkout@v7
       with:
@@ -138,6 +178,7 @@ runs:
     # The review's own recipe asks the model to quote the rule behind a conventions finding; for these
     # private conventions it is told to paraphrase instead.
     - id: memory-instructions
+      if: steps.event.outputs.review == 'true'
       shell: bash
       env:
         MEMORY_REPOSITORY: ${{ inputs.memory-repository }}
@@ -175,6 +216,7 @@ runs:
     # ("1. `path:line`" or "1. (no file)") starts a finding, a numbered list inside one doesn't, and
     # neither does one inside a code block (a suggestion), which may hold blank lines.
     - id: earlier
+      if: steps.event.outputs.review == 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
@@ -218,6 +260,7 @@ runs:
     # reach the hook as arguments rather than files. The Bash guard (bash-guard.sh) is the session's
     # PreToolUse hook, copied with them.
     - id: tools
+      if: steps.event.outputs.review == 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
@@ -296,6 +339,7 @@ runs:
     # denied, since the commit only takes files the branch already tracks. Edit rules cover every tool
     # that edits a file; the deny rules win over the allow rule.
     - id: mode
+      if: steps.event.outputs.review == 'true'
       shell: bash
       env:
         FIX: ${{ inputs.fix }}
@@ -398,6 +442,7 @@ runs:
     # namespace bubblewrap needs; the runner is a throwaway VM, so that restriction is lifted here.
     # The step warns when the sandbox still can't start, so a run that reviews without Bash shows it.
     - name: Install the sandbox's dependencies
+      if: steps.event.outputs.review == 'true'
       shell: bash
       run: |
         # The package index is only refreshed when the image's own is too old to install them.
@@ -413,6 +458,7 @@ runs:
         fi
 
     - id: claude
+      if: steps.event.outputs.review == 'true'
       # An exact release: v1 moves, and would change what a pinned release of this action does.
       uses: anthropics/claude-code-action@4845bacbb38b3c4b15d948f035349786f678e068 # v1.0.267
       env:

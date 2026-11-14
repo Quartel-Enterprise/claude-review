@@ -73,9 +73,16 @@ on:
     types:
       - opened
       - ready_for_review
+      # GitHub starts no pull_request workflow while a pull request conflicts with its base: the push
+      # that solves the conflict brings the opening review instead (see "Pull requests opened with a
+      # conflict" below). Every other push ends in seconds without reviewing.
+      - synchronize
 
+# A push runs in a group of its own, so it neither cancels the opening review nor waits behind it.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  group: >-
+    ${{ github.workflow }}-${{ github.event.pull_request.number
+    }}${{ github.event.action == 'synchronize' && format('-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 jobs:
@@ -89,6 +96,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
+      # On a push, the review reads this workflow's earlier runs.
+      actions: read
       contents: read
       pull-requests: write
       issues: read
@@ -103,7 +112,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: Quartel-Enterprise/claude-review/review@1.2.0
+      - uses: Quartel-Enterprise/claude-review/review@1.2.1
         with:
           oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           fix: 'true'
@@ -145,7 +154,7 @@ before the push, so a fix that breaks the build shows up in its checks.
 A cheaper review, for a repository that wants a quick look rather than a thorough one:
 
 ```yaml
-      - uses: Quartel-Enterprise/claude-review/review@1.2.0
+      - uses: Quartel-Enterprise/claude-review/review@1.2.1
         with:
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
           model: sonnet
@@ -155,11 +164,24 @@ A cheaper review, for a repository that wants a quick look rather than a thoroug
 
 ### Reviewing again
 
-The review runs on `opened` and `ready_for_review` only. A reopened pull request isn't reviewed, and
-neither is a later push, the fix commit included. A draft marked ready a second time is reviewed
+The review runs when the pull request opens or a draft is marked ready. A reopened pull request isn't
+reviewed, and neither is a later push, the fix commit included. A draft marked ready a second time is reviewed
 again. To review again on demand, add a workflow of your own, for example one on
 `pull_request: types: [labeled]` that runs the same steps when a given label is added, passing
 `instructions` to say why. Without the review's `fix`, it only comments.
+
+### Pull requests opened with a conflict
+
+GitHub starts no `pull_request` workflow while a pull request conflicts with its base, so one opened,
+or marked ready, with a conflict gets no review on that event. With `synchronize` among the
+workflow's types, as above, the push that solves the conflict brings it: on a `synchronize` event,
+the action reviews only when the calling workflow has no earlier run since the pull request opened
+(any run counts, even one skipped while it was a draft), and never on a push by `bot-login`, its own
+fix commit. Every other push ends in a few seconds, green, without reviewing. The job needs
+`actions: read` for that; without it, or when GitHub's API fails, the push isn't reviewed.
+
+The gate doesn't wait for that review, since the push is the author's: the checks run on it right
+away, and again on the review's fix commit, if any.
 
 ### Your own GitHub App
 
@@ -173,7 +195,7 @@ name its bot user:
         with:
           client-id: ${{ vars.REVIEW_APP_CLIENT_ID }}
           private-key: ${{ secrets.REVIEW_APP_PRIVATE_KEY }}
-      - uses: Quartel-Enterprise/claude-review/review@1.2.0
+      - uses: Quartel-Enterprise/claude-review/review@1.2.1
         with:
           oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github-token: ${{ steps.app.outputs.token }}
@@ -285,7 +307,7 @@ jobs:
       proceed: ${{ steps.gate.outputs.proceed }}
     steps:
       - id: gate
-        uses: Quartel-Enterprise/claude-review/gate@1.2.0
+        uses: Quartel-Enterprise/claude-review/gate@1.2.1
         with:
           # bot-login: my-review-app[bot] # with your own GitHub App
           # A few minutes under timeout-minutes, so a stuck review lets the checks run.
@@ -392,13 +414,13 @@ jobs:
       pull-requests: write
     steps:
       - id: open
-        uses: Quartel-Enterprise/claude-review/threads@1.2.0
+        uses: Quartel-Enterprise/claude-review/threads@1.2.1
         with:
           command: open-threads
           pull-request: ${{ github.event.pull_request.number }}
           claude-only: 'true'
       - if: steps.open.outcome == 'success' && steps.open.outputs.count == '0'
-        uses: Quartel-Enterprise/claude-review/threads@1.2.0
+        uses: Quartel-Enterprise/claude-review/threads@1.2.1
         with:
           command: rerun-held
           sha: ${{ github.event.pull_request.head.sha }}
@@ -432,7 +454,7 @@ ones. With your own GitHub App, pass its `bot-login` to `open-threads` too.
 
 ## Versions
 
-Pin an exact release in every `uses:` (`@1.2.0`, the latest
+Pin an exact release in every `uses:` (`@1.2.1`, the latest
 [release](https://github.com/Quartel-Enterprise/claude-review/releases)) and bump all of them
 together: the gate and the threads action have to agree on which threads hold the checks and which
 step name marks a hold. Releases are immutable, so a tag always means the same code. A check in your
