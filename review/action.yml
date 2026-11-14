@@ -120,10 +120,11 @@ runs:
     # GitHub starts no pull_request workflow while the pull request conflicts with its base, so one
     # opened (or marked ready) with a conflict gets no review on that event. A caller that also runs
     # on synchronize gets it on the push that solves the conflict: on a push, the review runs only
-    # when the calling workflow has no earlier run since the pull request opened (any run counts,
-    # even a skipped one, such as a draft's opening), and never on the bot user's own fix commit.
-    # Every later push ends here, green, without reviewing. A failed read skips the review too, so a
-    # GitHub error never reviews every push.
+    # when the calling workflow has no run between the pull request's opening (or, for a draft, its
+    # last marking as ready) and this one, and never on the bot user's own fix commit. Runs a draft
+    # left before it was marked ready don't count, and neither does a push made seconds after this
+    # one. Every later push ends here, green, without reviewing. A failed read skips the review too,
+    # so a GitHub error never reviews every push.
     - id: event
       shell: bash
       env:
@@ -134,6 +135,7 @@ runs:
         BOT_LOGIN: ${{ inputs.bot-login }}
         HEAD_REF: ${{ github.head_ref }}
         OPENED_AT: ${{ github.event.pull_request.created_at }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
       run: |
         review() {
           echo "review=$1" >> "$GITHUB_OUTPUT"
@@ -144,9 +146,17 @@ runs:
           echo "::notice::A push by $BOT_LOGIN, the review's own fix commit, isn't reviewed."
           review false
         fi
-        if ! workflow=$(gh api "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID" --jq .workflow_id) ||
-          ! earlier=$(gh api "repos/$GH_REPO/actions/workflows/$workflow/runs?branch=$HEAD_REF&event=pull_request&created=%3E%3D$OPENED_AT&per_page=100" \
-            --jq "[.workflow_runs[] | select(.id != $GITHUB_RUN_ID)] | length"); then
+        # A re-run keeps its run's creation time, so it still sees the same runs before it.
+        if ! run=$(gh api "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID" --jq '"\(.workflow_id) \(.created_at)"') ||
+          ! ready=$(gh api --paginate "repos/$GH_REPO/issues/$PR_NUMBER/timeline?per_page=100" \
+            --jq '.[] | select(.event == "ready_for_review") | .created_at' | tail -n 1); then
+          echo "::warning::This workflow's earlier runs couldn't be read (does the job have actions: read?), so this push isn't reviewed."
+          review false
+        fi
+        read -r workflow created <<< "$run"
+        since=${ready:-$OPENED_AT}
+        if ! earlier=$(gh api "repos/$GH_REPO/actions/workflows/$workflow/runs?branch=$HEAD_REF&event=pull_request&created=%3E%3D$since&per_page=100" \
+            --jq "[.workflow_runs[] | select(.id != $GITHUB_RUN_ID and .created_at < \"$created\")] | length"); then
           echo "::warning::This workflow's earlier runs couldn't be read (does the job have actions: read?), so this push isn't reviewed."
           review false
         fi
