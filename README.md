@@ -258,9 +258,14 @@ prompt injection in a diff could ask the review to quote one in a public comment
 ## What a run costs
 
 After the session, the action adds one comment to the pull request with the run's cost: the
-`total_cost_usd` Claude Code reports in the session's result (`review/post-cost.sh`), with the split
-per model when more than one ran. The review and its fix commit are one session, so the figure covers
-both and isn't split between them; the comment says so only when the fix commit was pushed. It is a
+`total_cost_usd` Claude Code reports in the session's result (`review/post-cost.sh`), and a table of
+the models that ran: the model the review runs on (the `model` input) with the `effort` it ran at,
+then any other model of the session. What each was used for comes from the calls recorded in the
+execution file: how many it made in the session and how many in subagents, and a model with the
+cost but no call there was called by Claude Code outside the conversation. The effort is the
+`/code-review` skill's level, not a reasoning setting of the model. The review and its fix commit are
+one session, so the figure covers both and isn't split between them; the table says so only when the
+fix commit was pushed. It is a
 comment of its own, so it sends one more notification than the review: set `cost: 'false'` to leave
 it out. It needs the caller's `pull-requests: write`, which the review already has.
 

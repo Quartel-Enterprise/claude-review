@@ -614,6 +614,8 @@ runs:
         FIX: ${{ inputs.fix }}
         OAUTH: ${{ inputs.oauth-token != '' }}
         STATE: ${{ steps.tools.outputs.state }}
+        MODEL: ${{ inputs.model }}
+        EFFORT: ${{ inputs.effort }}
       run: '"$GITHUB_ACTION_PATH/post-cost.sh" "$PR_NUMBER"'
 
     # The action hides Claude's output, since the reviewed repository's logs may be public, so a tool
