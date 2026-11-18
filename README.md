@@ -128,6 +128,7 @@ runs on `pull_request` (any of its types). Drop `fix: 'true'` for a review that 
 | `effort` | `high` | The `/code-review` skill's level: `low`, `medium`, `high`, `xhigh` or `max`. Higher levels find more, some of it less certain, and cost more |
 | `max-findings` | `all` | `all` or a number: the review keeps the most severe ones |
 | `fix` | `'false'` | `'true'` to apply the findings and push them as a commit to the pull request's branch |
+| `cost` | `'true'` | `'true'` to comment what the run cost on the pull request, `'false'` to leave it out. See [What a run costs](#what-a-run-costs) |
 | `instructions` | | Extra instructions appended to the prompt, e.g. for a review on request |
 | `github-token`, `bot-login`, `bot-id` | none, `claude[bot]`, `209825114` | Review as your own GitHub App: see [below](#your-own-github-app) |
 | `memory-repository`, `memory-ssh-key`, `memory-files` | none | Private review conventions: see [below](#private-conventions) |
@@ -253,6 +254,20 @@ prompt injection in a diff could ask the review to quote one in a public comment
   `.claude` is removed for the review and restored before the fix commit.
 - `post-review.sh` masks anything shaped like a token before posting, and so does `commit-fixes.sh`
   for the commit message; it pushes nothing when a fix adds such a string.
+
+## What a run costs
+
+After the session, the action adds one comment to the pull request with the run's cost: the
+`total_cost_usd` Claude Code reports in the session's result (`review/post-cost.sh`), with the split
+per model when more than one ran. The review and its fix commit are one session, so the figure covers
+both and isn't split between them. A re-run of the step updates the run's comment instead of adding
+another.
+
+It is computed by Claude Code from the tokens it counted, not read off an invoice. With `oauth-token`
+nothing is billed per token, so the figure is what the same tokens would cost through the API; with
+`anthropic-api-key` it is close to what you pay. A run that times out or is cancelled has no result,
+so it has no comment. The comment needs the caller's `pull-requests: write`, which the review has
+already; set `cost: 'false'` to skip it.
 
 The action hides Claude's output, since the logs may be public. A tool the review was denied, or a
 Bash command the guard refused, shows as a warning on the run, with only its name and, for Bash, its
