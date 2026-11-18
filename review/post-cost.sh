@@ -54,14 +54,23 @@ run_url=""
 [ -z "${GITHUB_RUN_ID:-}" ] || run_url="${GITHUB_SERVER_URL:-https://github.com}/${repo}/actions/runs/${GITHUB_RUN_ID}"
 
 # shellcheck disable=SC2016 # the $ names are jq's, not the shell's
-body=$(jq -r --arg fixed "$fixed" --arg oauth "${OAUTH:-false}" --arg url "$run_url" --arg tag "$run_tag" '
+body=$(jq -r --arg fixed "$fixed" --arg model "${MODEL:-}" --arg effort "${EFFORT:-}" --arg oauth "${OAUTH:-false}" --arg url "$run_url" --arg tag "$run_tag" '
   # Two decimals, or four for a figure under a cent, so a small one still shows.
   def usd: if . > 0 and . < 0.01 then "$" + (. * 10000 | round / 10000 | tostring)
     else (. * 100 | round) as $cents
       | "$\($cents / 100 | floor).\($cents % 100 | tostring | if length < 2 then "0" + . else . end)" end;
-  "### Review cost\n\n**\(.cost | usd)**"
-  + (if $fixed == "true" then ", the review and its fix commit together" else "" end)
-  + (if (.models | length) > 1 then "\n\n" + ([.models[] | "- `\(.model)`: \(.cost | usd)"] | join("\n")) else "" end)
+  # The model the review runs on is the one the model input names (an alias such as opus matches
+  # claude-opus-5-5), else the most expensive one. The others are calls of the same session that the
+  # result gives no purpose for, and the effort is the review skill level, set for the review only.
+  ($model | ascii_downcase | sub("\\[[0-9a-z]+\\]$"; "")) as $wanted
+  | . as $r
+  | (([$r.models[] | select($wanted != "" and (.model | ascii_downcase | contains($wanted)))] | first) // $r.models[0] | .model?) as $main
+  | "### Review cost\n\n**\(.cost | usd)**"
+  + (if (.models | length) > 0 then "\n\n| Model | Effort | Used for | Cost |\n| --- | --- | --- | --- |\n"
+      + ([.models[] | . as $m
+        | "| `\($m.model)` | " + (if $m.model == $main and $effort != "" then "`\($effort)`" else "–" end)
+        + " | " + (if $m.model == $main then (if $fixed == "true" then "the review and its fix commit" else "the review" end) else "other calls of the session" end)
+        + " | \($m.cost | usd) |"] | join("\n")) else "" end)
   + "\n\n_Reported by Claude Code from the tokens it counted, not an invoice"
   + (if $oauth == "true" then "; the run uses a subscription, so nothing is billed per token and this is what the same tokens would cost through the API" else "" end)
   + (if .turns != null then ". \(.turns) turns" else "" end)
