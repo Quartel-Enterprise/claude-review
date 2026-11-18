@@ -75,6 +75,10 @@ inputs:
     description: "'true' to apply the findings and push them as a commit to the pull request's branch."
     required: false
     default: 'false'
+  cost:
+    description: "'true' to comment what the run cost on the pull request, as Claude Code reports it. 'false' to leave it out."
+    required: false
+    default: 'true'
 runs:
   using: "composite"
   steps:
@@ -596,6 +600,21 @@ runs:
         jq -r '[.[] | select(.type == "result")] | last | .result // ""' "$EXECUTION_FILE" |
           python3 "$TOOLS/extract-findings.py" |
           "$TOOLS/post-review.sh" "$PR_NUMBER"
+
+    # What the run cost, as one comment on the pull request: the total Claude Code reports in the
+    # session's result (post-cost.sh), the review and its fix commit together, since they are one
+    # session. The session is over, so it posts with the workflow's token, and it never fails the run.
+    - name: Comment what the review cost
+      if: ${{ !cancelled() && steps.event.outputs.review == 'true' && inputs.cost == 'true' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+        FIX: ${{ inputs.fix }}
+        OAUTH: ${{ inputs.oauth-token != '' }}
+        STATE: ${{ steps.tools.outputs.state }}
+      run: '"$GITHUB_ACTION_PATH/post-cost.sh" "$PR_NUMBER"'
 
     # The action hides Claude's output, since the reviewed repository's logs may be public, so a tool
     # the review was denied doesn't show anywhere. Only the tool's name is printed, and for Bash the
