@@ -33,14 +33,24 @@ fi
 
 # The last result of the session, reduced to what the comment shows. A model id is only kept when it
 # looks like one, and every number must be a number, so nothing else reaches the public comment.
-result=$(jq -c '[.[] | select(.type == "result")] | last
+result=$(jq -c '
+  # The calls of the conversation per model: the assistant messages, once per API response (a response
+  # with several blocks comes as several messages with one id), told apart by whether a subagent made
+  # them. A model of the cost with no message here was called outside the conversation.
+  ([.[] | select(.type == "assistant" and (.message.model | type == "string"))
+    | {id: (.message.id // null), model: .message.model, sub: (.parent_tool_use_id != null)}]
+    | group_by([.id // (. | tostring), .model]) | map(.[0])
+    | group_by(.model) | map({key: .[0].model, value: {main: ([.[] | select(.sub | not)] | length), sub: ([.[] | select(.sub)] | length)}})
+    | from_entries) as $calls
+  | [.[] | select(.type == "result")] | last
   | select(. != null and (.total_cost_usd | type == "number") and .total_cost_usd > 0)
   | {cost: .total_cost_usd,
      turns: (.num_turns | if type == "number" then . else null end),
      seconds: (.duration_ms | if type == "number" then (. / 1000 | round) else null end),
      models: [(.modelUsage // {}) | to_entries[]
        | select((.key | test("^[A-Za-z0-9._:-]+(\\[[0-9a-z]+\\])?$")) and (.value.costUSD | type == "number"))
-       | {model: .key, cost: .value.costUSD}] | sort_by(-.cost)}' "$file" 2> /dev/null)
+       | {model: .key, cost: .value.costUSD, main: ($calls[.key].main // 0), sub: ($calls[.key].sub // 0)}]
+       | sort_by(-.cost)}' "$file" 2> /dev/null)
 if [ -z "$result" ]; then
   echo "The session's result holds no cost, or a zero one, so there is none to report."
   exit 0
@@ -69,7 +79,15 @@ body=$(jq -r --arg fixed "$fixed" --arg model "${MODEL:-}" --arg effort "${EFFOR
   + (if (.models | length) > 0 then "\n\n| Model | Effort | Used for | Cost |\n| --- | --- | --- | --- |\n"
       + ([.models[] | . as $m
         | "| `\($m.model)` | " + (if $m.model == $main and $effort != "" then "`\($effort)`" else "–" end)
-        + " | " + (if $m.model == $main then (if $fixed == "true" then "the review and its fix commit" else "the review" end) else "other calls of the session" end)
+        + " | " + (
+            # What each model was used for, from the calls of the conversation it made.
+            ([if $m.main > 0 then "\($m.main) in the session" else empty end,
+              if $m.sub > 0 then "\($m.sub) in subagents" else empty end] | join(", ")) as $calls
+            | if $m.model == $main then (if $fixed == "true" then "the review and its fix commit" else "the review" end)
+                + (if $calls != "" then " (\($calls))" else "" end)
+              elif $m.main == 0 and $m.sub > 0 then "subagents (\($m.sub) call(s))"
+              elif $m.main > 0 then "turns of the session (\($calls))"
+              else "Claude Code calls outside the conversation" end)
         + " | \($m.cost | usd) |"] | join("\n")) else "" end)
   + "\n\n_Reported by Claude Code from the tokens it counted, not an invoice"
   + (if $oauth == "true" then "; the run uses a subscription, so nothing is billed per token and this is what the same tokens would cost through the API" else "" end)

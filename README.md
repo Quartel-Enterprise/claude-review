@@ -260,7 +260,9 @@ prompt injection in a diff could ask the review to quote one in a public comment
 After the session, the action adds one comment to the pull request with the run's cost: the
 `total_cost_usd` Claude Code reports in the session's result (`review/post-cost.sh`), and a table of
 the models that ran: the model the review runs on (the `model` input) with the `effort` it ran at,
-then any other model of the session, whose purpose the result doesn't say. The effort is the
+then any other model of the session. What each was used for comes from the calls recorded in the
+execution file: how many it made in the session and how many in subagents, and a model with the
+cost but no call there was called by Claude Code outside the conversation. The effort is the
 `/code-review` skill's level, not a reasoning setting of the model. The review and its fix commit are
 one session, so the figure covers both and isn't split between them; the table says so only when the
 fix commit was pushed. It is a
