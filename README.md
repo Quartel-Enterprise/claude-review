@@ -130,6 +130,7 @@ runs on `pull_request` (any of its types). Drop `fix: 'true'` for a review that 
 | `fix` | `'false'` | `'true'` to apply the findings and push them as a commit to the pull request's branch |
 | `cost` | `'true'` | `'true'` to comment what the run cost on the pull request, `'false'` to leave it out. See [What a run costs](#what-a-run-costs) |
 | `instructions` | | Extra instructions appended to the prompt, e.g. for a review on request |
+| `allowed-bots` | | Bots whose pull requests are reviewed too, as comma-separated logins without `[bot]` (e.g. `renovate`). A run a bot started fails otherwise, since claude-code-action refuses it |
 | `github-token`, `bot-login`, `bot-id` | none, `claude[bot]`, `209825114` | Review as your own GitHub App: see [below](#your-own-github-app) |
 | `memory-repository`, `memory-ssh-key`, `memory-files` | none | Private review conventions: see [below](#private-conventions) |
 

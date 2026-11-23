@@ -79,6 +79,10 @@ inputs:
     description: "'true' to comment what the run cost on the pull request, as Claude Code reports it. 'false' to leave it out."
     required: false
     default: 'true'
+  allowed-bots:
+    description: "Bots whose pull requests and pushes are reviewed too, as a comma-separated list of logins without [bot] (e.g. 'renovate,dependabot'). claude-code-action refuses a run a bot started unless it is listed. Empty for none."
+    required: false
+    default: ''
 runs:
   using: "composite"
   steps:
@@ -486,6 +490,7 @@ runs:
         github_token: ${{ inputs.github-token }}
         bot_name: ${{ inputs.bot-login }}
         bot_id: ${{ inputs.bot-id }}
+        allowed_bots: ${{ inputs.allowed-bots }}
         settings: |
           {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "${{ steps.tools.outputs.dir }}/bash-guard.sh ${{ steps.tools.outputs.state }}"}]}], "Stop": [{"hooks": [{"type": "command", "command": "${{ steps.tools.outputs.dir }}/stop-hook.sh ${{ steps.tools.outputs.state }} ${{ steps.tools.outputs.started }} ${{ inputs.fix }}", "timeout": 600}]}]}}
         prompt: |
