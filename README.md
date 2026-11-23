@@ -481,7 +481,7 @@ ones. With your own GitHub App, pass its `bot-login` to `open-threads` too.
 
 ## Versions
 
-Pin an exact release in every `uses:` (`@1.4.0`, the latest
+Pin an exact release in every `uses:` (`@1.5.0`, the latest
 [release](https://github.com/Quartel-Enterprise/claude-review/releases)) and bump all of them
 together: the gate and the threads action have to agree on which threads hold the checks and which
 step name marks a hold. Releases are immutable, so a tag always means the same code. A check in your
