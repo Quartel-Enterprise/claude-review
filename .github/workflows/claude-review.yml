@@ -1,0 +1,48 @@
+name: claude-review
+on:
+  pull_request:
+    types:
+      - opened
+      - ready_for_review
+      # GitHub starts no pull_request workflow while a pull request conflicts with its base: the push
+      # that solves the conflict brings the opening review instead (see "Pull requests opened with a
+      # conflict" in the docs). Every other push ends in seconds without reviewing.
+      - synchronize
+
+# A push runs in a group of its own, so it neither cancels the opening review nor waits behind it.
+concurrency:
+  group: >-
+    ${{ github.workflow }}-${{ github.event.pull_request.number
+    }}${{ github.event.action == 'synchronize' && format('-{0}', github.run_id) || '' }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # GitHub withholds secrets from pull requests opened from forks, so the review can't run there.
+    # Dependabot's pull requests only get Dependabot's secrets, so they are skipped too.
+    if: >-
+      !github.event.pull_request.draft &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # On a push, the review reads this workflow's earlier runs.
+      actions: read
+      contents: read
+      pull-requests: write
+      issues: read
+      id-token: write
+    steps:
+      # The head commit, not GitHub's merge of it with main: the review's line numbers have to match
+      # the commit the comments are anchored to. No persisted credentials: checkout keeps
+      # GITHUB_TOKEN's header in a file of its own, which claude-code-action doesn't find when it
+      # swaps in the App's token, so the fix push would be refused.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: Quartel-Enterprise/claude-review/review@1.5.0
+        with:
+          oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
