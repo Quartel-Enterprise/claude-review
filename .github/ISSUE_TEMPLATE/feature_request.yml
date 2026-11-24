@@ -1,0 +1,33 @@
+name: Feature request
+description: Suggest an input, an output or a change in behaviour
+labels:
+  - enhancement
+body:
+  - type: dropdown
+    id: action
+    attributes:
+      label: Action
+      options:
+        - review
+        - gate
+        - threads
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The situation first, then what's missing.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like it to do?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you tried
