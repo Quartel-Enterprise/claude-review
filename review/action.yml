@@ -442,7 +442,7 @@ runs:
     # the review was denied, or the guard refused, shows as a warning on the run (last step): allow it
     # only when it can neither read nor write a file it is given, nor print the environment, and then
     # in the four places that list the commands together: --allowedTools, bash-guard.sh, the prompt
-    # and the README.
+    # and docs/security-model.md.
     #
     # Claude Code's native Linux build has no Grep or Glob tool unless --tools names them, and its
     # Bash grep and find are refused here, so --tools lists every tool the review uses (the mode
