@@ -21,7 +21,7 @@ bot_login=${BOT_LOGIN:-github-actions[bot]}
 bot_id=${BOT_ID:-41898282}
 push_token=${FIX_PUSH_TOKEN:-}
 
-safe_git() { git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"; }
+safe_git() { git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.quotePath=false "$@"; }
 fail() {
   echo "commit-fixes: $*" >&2
   exit 1

@@ -87,9 +87,39 @@ def lookup_gemini_rate(model_name):
 
 
 def parse_claude(exec_path, meta, wanted_model, effort, fixed, show_micro_costs):
+    meta_duration = None
+    if isinstance(meta, dict) and isinstance(meta.get("duration_seconds"), (int, float)):
+        meta_duration = int(round(meta["duration_seconds"]))
+    meta_model = meta.get("model") if isinstance(meta, dict) else wanted_model
+    meta_effort = meta.get("effort") if isinstance(meta, dict) else effort
+
+    def duration_only_fallback():
+        if meta_duration is None or meta_duration <= 0:
+            return None
+        fallback_rows = []
+        if meta_model and is_valid_model_id(meta_model):
+            fallback_rows.append({
+                "provider": "Claude",
+                "model": meta_model,
+                "cost": None,
+                "is_main": True,
+                "effort": meta_effort or "–",
+                "duration": meta_duration,
+                "used_for": "the review",
+            })
+        return {
+            "provider": "claude",
+            "label": "Claude",
+            "cost": None,
+            "duration": meta_duration,
+            "turns": None,
+            "rows": fallback_rows,
+            "hidden_micro": 0,
+        }
+
     data = load_json(exec_path)
     if not isinstance(data, list):
-        return None
+        return duration_only_fallback()
 
     # Count distinct assistant calls per model (main vs subagent).
     seen = set()
@@ -115,18 +145,18 @@ def parse_claude(exec_path, meta, wanted_model, effort, fixed, show_micro_costs)
 
     results = [e for e in data if isinstance(e, dict) and e.get("type") == "result"]
     if not results:
-        return None
+        return duration_only_fallback()
     last = results[-1]
     raw_total = last.get("total_cost_usd")
     if not isinstance(raw_total, (int, float)) or raw_total <= 0:
-        return None
+        return duration_only_fallback()
 
     turns = last.get("num_turns") if isinstance(last.get("num_turns"), (int, float)) else None
     duration = None
     if isinstance(last.get("duration_ms"), (int, float)) and last["duration_ms"] > 0:
         duration = int(round(last["duration_ms"] / 1000.0))
-    elif isinstance(meta, dict) and isinstance(meta.get("duration_seconds"), (int, float)):
-        duration = int(round(meta["duration_seconds"]))
+    elif meta_duration is not None:
+        duration = meta_duration
 
     usage = last.get("modelUsage")
     rows = []

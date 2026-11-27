@@ -95,13 +95,25 @@ if [ -e "$install_home" ] || [ -L "$install_home" ]; then
     exit 1
   fi
 fi
+
+# Stage next to install_home so the final rename stays on the same filesystem and is atomic.
+staged="${install_home}.new.$$"
 backup="${install_home}.old.$$"
-rm -rf "$backup"
-[ -e "$install_home" ] && mv "$install_home" "$backup"
-if mv "$tmp/extract" "$install_home"; then
+rm -rf "$staged" "$backup"
+if ! mv "$tmp/extract" "$staged"; then
+  rm -rf "$staged"
+  echo "Failed to stage installation next to $install_home" >&2
+  exit 1
+fi
+
+if [ -e "$install_home" ] || [ -L "$install_home" ]; then
+  mv "$install_home" "$backup"
+fi
+if mv "$staged" "$install_home"; then
   rm -rf "$backup"
 else
-  [ -e "$backup" ] && mv "$backup" "$install_home"
+  rm -rf "$install_home" "$staged"
+  [ -e "$backup" ] || [ -L "$backup" ] && mv "$backup" "$install_home"
   echo "Failed to move installation into $install_home" >&2
   exit 1
 fi

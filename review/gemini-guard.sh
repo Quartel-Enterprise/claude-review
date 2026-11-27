@@ -91,9 +91,12 @@ check_pattern_safe() {
   [ -n "$raw" ] || return 0
   local reason
   if ! reason=$(python3 - "$raw" <<'PY'
-import re, sys
+import fnmatch, re, sys
 
 raw = sys.argv[1]
+if "\\" in raw:
+    print("cannot contain backslashes")
+    sys.exit(1)
 # Split across brace-expansion delimiters so payloads like `{../*,a}` or `{.git/config,*}`
 # cannot hide disallowed paths inside brace alternatives.
 tokens = [t for t in re.split(r"[{},]+", raw) if t]
@@ -102,11 +105,18 @@ for tok in tokens:
         print("cannot start with '/' or '~'")
         sys.exit(1)
     for part in tok.split("/"):
-        if part == ".." or (part.startswith(".") and ("*" in part or "?" in part or "[" in part or "]" in part)):
-            print("cannot traverse parent directories or wildcard hidden paths")
+        if not part:
+            continue
+        if part == ".." or part == ".git":
+            print("cannot traverse parent directories or target .git")
             sys.exit(1)
-        if part == ".git":
-            print("cannot target .git")
+        if part in ("*", "**"):
+            continue
+        if (part.startswith(".") and any(c in part for c in "*?[]")) or fnmatch.fnmatchcase(part, ".git") or fnmatch.fnmatchcase(part, ".."):
+            print("cannot match .git or parent directories via wildcards")
+            sys.exit(1)
+        if fnmatch.fnmatchcase(".git", part) or fnmatch.fnmatchcase("..", part):
+            print("cannot match .git or parent directories via wildcards")
             sys.exit(1)
 PY
   ); then

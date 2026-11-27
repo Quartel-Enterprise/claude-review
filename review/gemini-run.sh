@@ -313,10 +313,16 @@ if [ "$fix" = true ]; then
         git -C "$workspace" -c core.hooksPath=/dev/null -c core.fsmonitor=false \
           checkout --pathspec-from-file=- --pathspec-file-nul 2> /dev/null || true
     fi
+    # Rewrite any "fixed" outcome in gemini-findings.json to "skipped" so reverted edits are never reported as fixed.
+    if [ -f "$state/gemini-findings.json" ]; then
+      jq -c 'map(if type == "object" and .outcome == "fixed" then .outcome = "skipped" else . end)' \
+        "$state/gemini-findings.json" > "$state/gemini-findings.json.tmp" &&
+        mv "$state/gemini-findings.json.tmp" "$state/gemini-findings.json"
+    fi
   else
-    # Snapshot Gemini's confirmed edits so multi-provider fallback can restore them if Claude fails mid-edit.
+    # Snapshot only modified tracked files (--diff-filter=M) so deleted unsafe symlinks aren't re-applied on fallback.
     git -C "$workspace" -c core.hooksPath=/dev/null -c core.fsmonitor=false \
-      diff --binary > "$state/gemini-fixes.patch" 2> /dev/null || rm -f "$state/gemini-fixes.patch"
+      diff --binary --diff-filter=M > "$state/gemini-fixes.patch" 2> /dev/null || rm -f "$state/gemini-fixes.patch"
   fi
 fi
 

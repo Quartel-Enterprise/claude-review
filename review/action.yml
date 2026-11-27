@@ -740,6 +740,28 @@ runs:
           exit 0
         fi
 
+        # If Claude ran in fix mode and failed or left no findings list, drop unconfirmed Claude
+        # edits before merging so reverted findings are never reported as "fixed".
+        claude_reverted=false
+        if [ "$FIX" = true ] && [ ! -f "$STATE/.pushed" ] && [ "$RUN_CLAUDE" = true ] && { [ "$CLAUDE_OUTCOME" != success ] || [ ! -f "$STATE/claude-findings.json" ]; }; then
+          if [ -n "$(git diff --diff-filter=M --name-only 2> /dev/null)" ]; then
+            git -c core.hooksPath=/dev/null -c core.fsmonitor=false \
+              diff --diff-filter=M --name-only -z |
+              git -c core.hooksPath=/dev/null -c core.fsmonitor=false \
+                checkout --pathspec-from-file=- --pathspec-file-nul 2> /dev/null || true
+          fi
+          if [ -s "$STATE/gemini-fixes.patch" ]; then
+            git -c core.hooksPath=/dev/null -c core.fsmonitor=false \
+              apply "$STATE/gemini-fixes.patch" 2> /dev/null || true
+          fi
+          if [ -f "$STATE/claude-findings.json" ]; then
+            jq -c 'map(if type == "object" and .outcome == "fixed" then .outcome = "skipped" else . end)' \
+              "$STATE/claude-findings.json" > "$STATE/claude-findings.json.tmp" &&
+              mv "$STATE/claude-findings.json.tmp" "$STATE/claude-findings.json"
+          fi
+          claude_reverted=true
+        fi
+
         findings=$(python3 "$TOOLS/merge-findings.py" "${merge_args[@]}")
         if [ -z "$findings" ]; then
           PROVIDER_WARNINGS="$provider_warnings" "$TOOLS/post-review.sh" "$PR_NUMBER" < /dev/null
@@ -750,19 +772,8 @@ runs:
         # (i.e. Gemini-only runs or runs with an explicit custom github-token). Otherwise a
         # GITHUB_TOKEN push would skip downstream check workflows on the fix commit.
         if [ "$FIX" = true ] && [ ! -f "$STATE/.pushed" ] && { [ "$RUN_CLAUDE" != true ] || [ "$HAS_GITHUB_TOKEN" = true ]; }; then
-          # If Claude ran and failed or left no findings list, revert any unconfirmed Claude edits
-          # and restore only Gemini's confirmed patch (if any) before committing.
-          if [ "$RUN_CLAUDE" = true ] && { [ "$CLAUDE_OUTCOME" != success ] || [ ! -f "$STATE/claude-findings.json" ]; }; then
-            if [ -n "$(git diff --diff-filter=M --name-only 2> /dev/null)" ]; then
-              git -c core.hooksPath=/dev/null -c core.fsmonitor=false \
-                diff --diff-filter=M --name-only -z |
-                git -c core.hooksPath=/dev/null -c core.fsmonitor=false \
-                  checkout --pathspec-from-file=- --pathspec-file-nul 2> /dev/null || true
-            fi
-            if [ -s "$STATE/gemini-fixes.patch" ]; then
-              git -c core.hooksPath=/dev/null -c core.fsmonitor=false \
-                apply "$STATE/gemini-fixes.patch" 2> /dev/null || true
-            fi
+          if [ "$claude_reverted" = true ]; then
+            echo "::notice::Reverted unconfirmed Claude edits and restored confirmed Gemini patch before committing."
           fi
           if sha=$("$TOOLS/commit-fixes.sh" <<< "$findings" 2> "$STATE/.commit-log"); then
             echo "$sha" > "$STATE/.pushed"

@@ -159,13 +159,14 @@ cmd_skills() {
       *) action=$1; shift ;;
     esac
   fi
-  local agent="all" project=""
+  local agent="all" project="" force=false
   while [ $# -gt 0 ]; do
     case "$1" in
       --agent) agent=$(lower "${2:?missing value for --agent}"); shift 2 ;;
       --project) project=${2:?missing value for --project}; shift 2 ;;
+      --force) force=true; shift ;;
       -h | --help)
-        echo "Usage: ai-review skills <install|remove|status> [--agent all|antigravity|claude|codex] [--project <dir>]"
+        echo "Usage: ai-review skills <install|remove|status> [--agent all|antigravity|claude|codex] [--project <dir>] [--force]"
         return 0
         ;;
       *) echo "Unknown skills option: $1" >&2; return 2 ;;
@@ -185,7 +186,14 @@ cmd_skills() {
             echo "✓ Skill already installed -> $target"
             continue
           fi
-          [ ! -L "$target" ] && rm -rf "$target"
+          if [ ! -L "$target" ]; then
+            if [ "$force" = true ]; then
+              rm -rf "$target"
+            else
+              echo "! Skipping existing non-symlink directory/file at $target (pass --force to replace it)" >&2
+              continue
+            fi
+          fi
         fi
         ln -sfn "$skill_dir" "$target"
         echo "✓ Linked skill -> $target"
@@ -630,18 +638,23 @@ run_claude_provider() {
     [ -n "${ANTHROPIC_API_KEY:-}" ] && is_sub=false
     local tools_arg
     local -a perm_args=()
+    local -a effort_args=()
     if [ "$fix" = true ]; then
       tools_arg="Read,Edit,Grep,Glob"
       perm_args=(--permission-mode acceptEdits)
     else
       tools_arg="Read,Grep,Glob"
     fi
+    case "$(lower "$claude_effort")" in
+      low | medium | high | xhigh | max) effort_args=(--effort "$(lower "$claude_effort")") ;;
+    esac
     echo "[claude] Running via claude CLI (model=$resolved_model, effort=$claude_effort)..." >&2
     # Feed prompt on stdin so large diffs never hit Linux's 128 KiB MAX_ARG_STRLEN.
     claude --print \
       --model "$resolved_model" \
       --add-dir "$state" \
       --tools "$tools_arg" \
+      ${effort_args[@]+"${effort_args[@]}"} \
       ${perm_args[@]+"${perm_args[@]}"} \
       --output-format json \
       < "$prompt_file" \
