@@ -120,6 +120,7 @@ All inputs and outputs (`claude-model`, `gemini-model`, `effort`, `show-micro-co
 | [What a run costs and takes](docs/cost.md) | The cost & timing comment, micro-cost filtering, and how figures are computed |
 | [Security model](docs/security-model.md) | What Claude and Gemini can read and run, and what is left |
 | [When something goes wrong](docs/troubleshooting.md) | Symptoms and fixes |
+| [Migrating from v1 to v2](migrations/v1-to-v2.md) | Breaking changes, before/after YAML snippets, and migration checklist |
 
 ## Versions
 
