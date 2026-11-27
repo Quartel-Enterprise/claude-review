@@ -114,7 +114,7 @@ All inputs and outputs (`claude-model`, `gemini-model`, `effort`, `show-micro-co
 | | |
 | --- | --- |
 | [The review](docs/review.md) | Inputs, outputs, multi-provider setups, fixes, reviewing again, your own GitHub App, private conventions |
-| [Local review & hybrid setup](docs/local.md) | Run Gemini/Antigravity (`agy`), Claude, or both locally via `local/ai-review.sh` and the `/ai-review` skill |
+| [Local review & hybrid setup](docs/local.md) | Install `ai-review` CLI (`install.sh` + `ai-review update`) or `/ai-review` skill (`npx skills add`) with zero cloning |
 | [The gate](docs/gate.md) | Hold your checks until the review ends, so they run once, on the final commit |
 | [The threads](docs/threads.md) | Re-run the held checks once the review's threads are resolved |
 | [What a run costs and takes](docs/cost.md) | The cost & timing comment, micro-cost filtering, and how figures are computed |

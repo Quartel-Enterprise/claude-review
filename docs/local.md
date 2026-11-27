@@ -1,8 +1,8 @@
 # Local review & hybrid setup
 
-`local/ai-review.sh` lets you run the same structured code review locally from **any** git
-repository using **Gemini / Antigravity (`agy`)**, **Claude (`claude`)**, or **both in parallel**
-— consuming your local subscriptions with zero pay-as-you-go API billing.
+Run the same structured code review locally from **any** git repository using
+**Gemini / Antigravity (`agy`)**, **Claude (`claude`)**, or **both in parallel** — consuming your
+local subscriptions with zero pay-as-you-go API billing, and **no git clone required**.
 
 ## Recommended hybrid setup (\$0 pay-as-you-go)
 
@@ -14,21 +14,40 @@ repository using **Gemini / Antigravity (`agy`)**, **Claude (`claude`)**, or **b
 You get two independent frontier model families reviewing the same pull request without paying
 per-token API fees — and you are free to flip or combine providers locally or in CI at any time.
 
-## Install once
+## Install without cloning
 
-Link `local/ai-review.sh` into your `PATH`:
+Pick either installation method (both require zero manual cloning and update in one command):
+
+### Option A: `ai-review` CLI + Agent Skill (recommended, `android` CLI style)
+
+Installs `ai-review` into `~/.local/bin` from the latest GitHub Release and automatically links the
+`/ai-review` skill into detected agents (Antigravity, Claude Code, Codex):
 
 ```bash
-mkdir -p ~/.local/bin
-ln -sf /path/to/ai-review/local/ai-review.sh ~/.local/bin/ai-review
+curl -fsSL https://raw.githubusercontent.com/Quartel-Enterprise/ai-review/main/install.sh | bash
 ```
 
-To also expose `/ai-review` as an Agent Skill in Antigravity and/or Claude Code:
+Keep CLI + skill up to date anytime:
 
 ```bash
-mkdir -p ~/.gemini/skills ~/.claude/skills
-ln -sfn /path/to/ai-review/skills/ai-review ~/.gemini/skills/ai-review
-ln -sfn /path/to/ai-review/skills/ai-review ~/.claude/skills/ai-review
+ai-review update
+ai-review skills status
+ai-review skills install --agent claude # or antigravity, codex, all
+```
+
+### Option B: `npx skills` (Agent Skill only, same ecosystem as `android/skills`)
+
+Installs the self-contained `skills/ai-review/` bundle directly into Antigravity, Claude Code,
+Codex, Cursor, and other compatible agents:
+
+```bash
+npx skills add Quartel-Enterprise/ai-review
+```
+
+Update anytime:
+
+```bash
+npx skills update
 ```
 
 ## Usage
@@ -45,7 +64,7 @@ ai-review --provider antigravity --effort xhigh
 # Review with Claude locally (uses local `claude` CLI subscription)
 ai-review --provider claude --model opus
 
-# Run Claude and Gemini/Antigravity in parallel locally (consolidated report + timing)
+# Run Claude and Gemini/Antigravity in parallel locally (consolidated report + timing + cost)
 ai-review --provider claude,antigravity --effort high
 
 # Apply clear, contained fixes locally (never commits or pushes)
@@ -60,10 +79,13 @@ ai-review --provider antigravity --pr 42
 ai-review --provider antigravity --pr 42 --post
 ```
 
-## Options
+## Subcommands & Options
 
-| Flag | Default | Description |
+| Command / Flag | Default | Description |
 | --- | --- | --- |
+| `ai-review update [--version <tag>]` | latest release | Updates the installed CLI and bundled skill from GitHub Releases (or `git pull` in a clone) |
+| `ai-review skills install\|remove\|status` | detected agents | Links, removes, or inspects `/ai-review` skill links (`--agent all\|antigravity\|claude\|codex`, `--project <dir>`) |
+| `ai-review version` | | Prints the installed version |
 | `-p`, `--provider` | `gemini` | `gemini`, `antigravity` (alias for `gemini`), `claude`, or comma-separated (`claude,antigravity`) |
 | `-m`, `--model` | provider default | Shorthand model alias/id when running a single provider |
 | `--gemini-model` | `neon` (`gemini-4-neon`) | `neon`, `carbon`, `argon`, `hydrogen`, or full model id |
@@ -75,7 +97,7 @@ ai-review --provider antigravity --pr 42 --post
 | `--base <ref>` | auto (`origin/main`, `main`, `master`) | Diff against a git ref (includes committed + uncommitted tracked edits) |
 | `--staged` | off | Review staged changes only (`git diff --cached`) |
 | `--pr <number>` | none | Review PR `#<number>` via `gh pr diff` |
-| `--post` | off | Post merged findings to `--pr` via `review/post-review.sh` |
+| `--post` | off | Post merged findings to `--pr` via `post-review.sh` |
 | `--fix` | off | Allow applying clear local fixes (runs providers sequentially when multiple are enabled) |
 | `--max-findings` | `all` | Cap findings per provider (`all` or positive integer) |
 | `--instructions` | empty | Extra review instructions |

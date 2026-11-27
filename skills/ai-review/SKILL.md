@@ -6,17 +6,14 @@ description: Run a local AI code review on the current branch, staged diff, or p
 # AI Review (Local Skill)
 
 Run a structured local code review using the same findings format (`🔴 Must fix`, `🟡 Should fix`,
-`⚪ Nitpick`) and conventions (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`) as the `ai-review` GitHub
-Actions.
+`⚪ Nitpick`), conventions (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`), timing, and API-equivalent cost
+reporting as the `ai-review` GitHub Actions.
 
-## Prerequisites
+## How to run
 
-Link `local/ai-review.sh` into your `PATH` once:
-
-```bash
-mkdir -p ~/.local/bin
-ln -sf /path/to/ai-review/local/ai-review.sh ~/.local/bin/ai-review
-```
+This skill bundles its own self-contained CLI at `scripts/ai-review.sh` (next to this `SKILL.md`).
+Run `ai-review` if it is on `PATH`, or invoke `scripts/ai-review.sh` directly from this skill's
+directory — no repository clone is required.
 
 - **Gemini / Antigravity (`--provider gemini` or `--provider antigravity`):** uses the local `agy`
   CLI authenticated with your Google subscription by default (`gemini-4-neon-high`). Pass
@@ -27,7 +24,7 @@ ln -sf /path/to/ai-review/local/ai-review.sh ~/.local/bin/ai-review
 ## Common Workflows
 
 ### 1. Hybrid setup (zero pay-as-you-go cost)
-- **Locally (before pushing / opening PR):** review with Gemini via Antigravity subscription:
+- **Locally (before pushing / opening a PR):** review with Gemini via Antigravity subscription:
   ```bash
   ai-review --provider antigravity --effort high
   ```
@@ -53,10 +50,15 @@ ai-review --provider antigravity --pr 42
 ai-review --provider antigravity --pr 42 --post
 ```
 
-## Model & Effort Options
+## Updating
 
-- `--provider`: `gemini`, `antigravity` (alias for `gemini`), `claude`, or `claude,antigravity`
+- Installed via `npx skills add Quartel-Enterprise/ai-review`: run `npx skills update`.
+- Installed via `install.sh`: run `ai-review update` (and `ai-review skills status` to verify).
+
+## Options
+
+- `-p`, `--provider`: `gemini`, `antigravity` (alias for `gemini`), `claude`, or `claude,antigravity`
 - `--gemini-model`: `neon` (default, `gemini-4-neon`), `carbon`, `argon`, `hydrogen`, or full id
 - `--claude-model`: `opus` (default), `sonnet`, `haiku`, or full id
-- `--effort`: `low`, `medium`, `high` (default), `xhigh`, `max`
-- `--base <ref>`, `--staged`, `--pr <N>`, `--post`, `--fix`, `--max-findings <n|all>`, `--json`
+- `-e`, `--effort`: `low`, `medium`, `high` (default), `xhigh`, `max`
+- `--base <ref>`, `--staged`, `--pr <N>`, `--post`, `--fix`, `--max-findings <n|all>`, `--show-micro-costs`, `--json`
