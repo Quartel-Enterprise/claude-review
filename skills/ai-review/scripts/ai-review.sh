@@ -165,14 +165,19 @@ cmd_skills() {
 
   case "$action" in
     install | add)
-      local targets target
+      local targets target target_real
       targets=$(resolve_skill_targets "$agent" "$project") || return $?
       while IFS= read -r target; do
         [ -n "$target" ] || continue
         mkdir -p "$(dirname "$target")"
-        # Remove existing non-symlink directory/file so ln -sfn never nests a symlink inside it.
-        if [ -e "$target" ] && [ ! -L "$target" ]; then
-          rm -rf "$target"
+        if [ -e "$target" ] || [ -L "$target" ]; then
+          target_real=$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$target")
+          if [ "$target_real" = "$skill_dir" ]; then
+            echo "✓ Skill already installed -> $target"
+            continue
+          fi
+          # Remove existing non-symlink directory/file so ln -sfn never nests a symlink inside it.
+          [ ! -L "$target" ] && rm -rf "$target"
         fi
         ln -sfn "$skill_dir" "$target"
         echo "✓ Linked skill -> $target"
@@ -269,7 +274,7 @@ canonical=()
 raw_list=()
 IFS=',' read -r -a raw_list <<< "$providers_raw"
 for item in ${raw_list[@]+"${raw_list[@]}"}; do
-  p=$(lower "$item" | xargs)
+  p=$(lower "$item" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
   [ -n "$p" ] || continue
   case "$p" in
     claude)
@@ -325,6 +330,7 @@ if [ "$post_pr" = true ] && [ -z "$pr_number" ]; then
   exit 2
 fi
 
+command -v jq > /dev/null 2>&1 || { echo "jq is required by ai-review (install via brew install jq / apt-get install jq)." >&2; exit 1; }
 git rev-parse --show-toplevel > /dev/null 2>&1 || { echo "Run ai-review inside a git repository." >&2; exit 1; }
 workspace=$(git rev-parse --show-toplevel)
 cd "$workspace"
@@ -391,6 +397,15 @@ diff_file="$state/review.diff"
 target_desc=""
 
 if [ -n "$pr_number" ]; then
+  local_head=$(git rev-parse HEAD 2> /dev/null || echo "")
+  pr_head=$(gh pr view "$pr_number" --json headRefOid --jq .headRefOid 2> /dev/null || echo "")
+  if [ -n "$pr_head" ] && [ -n "$local_head" ] && [ "$local_head" != "$pr_head" ]; then
+    if [ "$fix" = true ]; then
+      echo "Refusing --fix with --pr #$pr_number: local HEAD ($local_head) does not match PR head ($pr_head). Run 'gh pr checkout $pr_number' first." >&2
+      exit 2
+    fi
+    echo "Warning: local HEAD does not match PR #$pr_number head ($pr_head); file context and line numbers may be stale. Run 'gh pr checkout $pr_number' for an accurate review." >&2
+  fi
   gh pr diff "$pr_number" > "$diff_file"
   target_desc="pull request #$pr_number"
 elif [ "$staged" = true ]; then
@@ -512,6 +527,7 @@ run_gemini_provider() {
     [ "$fix" = true ] && approval_mode="auto_edit"
     echo "[gemini] Running via gemini-cli (model=$resolved_model, approval=$approval_mode)..." >&2
     gemini --model "$resolved_model" \
+      --include-directories "$state" \
       --approval-mode "$approval_mode" \
       --output-format json \
       --prompt "Follow the code review instructions provided on stdin." \
@@ -603,6 +619,7 @@ run_claude_provider() {
     # Feed prompt on stdin so large diffs never hit Linux's 128 KiB MAX_ARG_STRLEN.
     claude --print \
       --model "$resolved_model" \
+      --add-dir "$state" \
       --tools "$tools_arg" \
       ${perm_args[@]+"${perm_args[@]}"} \
       --output-format json \

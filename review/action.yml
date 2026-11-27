@@ -140,7 +140,7 @@ runs:
         canonical=()
         IFS=',' read -r -a raw_list <<< "$RAW_PROVIDERS"
         for item in "${raw_list[@]}"; do
-          p=$(tr '[:upper:]' '[:lower:]' <<< "$item" | xargs)
+          p=$(tr '[:upper:]' '[:lower:]' <<< "$item" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
           [ -n "$p" ] || continue
           case "$p" in
             claude)
@@ -231,7 +231,7 @@ runs:
             bot_id=${BOT_ID:-41898282}
           fi
           if [ "$FIX" = true ] && [ "$run_claude" = false ]; then
-            echo "::warning::fix is 'true' without github-token on a Gemini-only run: commits pushed with GITHUB_TOKEN will not trigger pull request workflows. Pass a GitHub App token via github-token if you use the gate action."
+            echo "::warning::fix is 'true' without github-token on a Gemini-only run: pushing with GITHUB_TOKEN requires 'permissions: contents: write' on the job, and pushed commits will not trigger pull request workflows. Pass a GitHub App token via github-token if you use the gate action."
           fi
         fi
         if [ -n "$bot_login" ]; then
@@ -292,7 +292,7 @@ runs:
           allowed=false
           IFS=',' read -r -a bots <<< "$ALLOWED_BOTS"
           for b in "${bots[@]}"; do
-            b=$(xargs <<< "$b")
+            b=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<< "$b")
             [ -n "$b" ] && [ "$b" = "$bot_name" ] && allowed=true
           done
           if [ "$allowed" != true ]; then
@@ -490,6 +490,8 @@ runs:
       shell: bash
       env:
         FIX: ${{ inputs.fix }}
+        RUN_GEMINI: ${{ steps.config.outputs.run-gemini }}
+        REVIEWED_DIR: ${{ steps.tools.outputs.reviewed }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         WORKSPACE: ${{ github.workspace }}
         EFFORT: ${{ steps.config.outputs.claude-effort }}
@@ -502,8 +504,16 @@ runs:
             echo "allowed=,Edit(/$WORKSPACE/**)"
             echo "denied=Write,NotebookEdit,Edit(/$WORKSPACE/.git/**),Edit(/$WORKSPACE/.github/**),Edit(/$WORKSPACE/.claude/**),Edit(/$WORKSPACE/.gemini/**),Edit(/$WORKSPACE/.agent-memory/**),"
             echo "task<<TASK_END"
-            echo "and let it apply its findings to the working tree, which is the pull request's head"
-            echo "commit. Apply a fix only when it is clear and stays within what the finding describes,"
+            if [ "$RUN_GEMINI" = true ]; then
+              echo "and let it apply its findings to the working tree. Note that Gemini already ran and"
+              echo "may have applied its own fixes to the working tree: don't revert Gemini's fixes,"
+              echo "don't report issues inside them as author bugs, and always verify line numbers and"
+              echo "pre-fix code against $REVIEWED_DIR/<file> (the untouched reviewed head commit)."
+            else
+              echo "and let it apply its findings to the working tree, which is the pull request's head"
+              echo "commit."
+            fi
+            echo "Apply a fix only when it is clear and stays within what the finding describes,"
             echo "editing files that already exist; leave a finding that needs the author's call (a design"
             echo "choice, a product behaviour, a fix that needs a new file) as it is. Never edit anything"
             echo "under .git, .github, .claude, .gemini or .agent-memory, and don't commit or push: a later step"

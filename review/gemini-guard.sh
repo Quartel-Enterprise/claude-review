@@ -48,10 +48,14 @@ import os, sys
 raw, base = sys.argv[1], sys.argv[2]
 if not raw:
     print(os.path.realpath(base))
-elif os.path.isabs(raw):
-    print(os.path.realpath(raw))
 else:
-    print(os.path.realpath(os.path.join(base, raw)))
+    expanded = os.path.expanduser(raw)
+    if expanded.startswith("~"):
+        sys.exit(1)
+    if os.path.isabs(expanded):
+        print(os.path.realpath(expanded))
+    else:
+        print(os.path.realpath(os.path.join(base, expanded)))
 PY
 }
 
@@ -205,12 +209,20 @@ case "$tool_name" in
       check_read_path "$p"
     done <<< "$paths"
 
-    if [ "$tool_name" = glob ] || [ "$tool_name" = grep_search ]; then
+    if [ "$tool_name" = glob ]; then
       pats=$(extract_fields '[(.pattern, .include) | strings | select(length > 0)] | .[]') ||
         deny "$tool_name" "couldn't inspect pattern/include parameters"
       while IFS= read -r pat; do
         [ -n "$pat" ] || continue
         check_pattern_safe "$pat" "pattern/include"
+      done <<< "$pats"
+    elif [ "$tool_name" = grep_search ]; then
+      # For grep_search, .pattern is a content regex; only file-filter fields (.include, .glob) are paths.
+      pats=$(extract_fields '[(.include, .glob) | strings | select(length > 0)] | .[]') ||
+        deny "$tool_name" "couldn't inspect include/glob parameters"
+      while IFS= read -r pat; do
+        [ -n "$pat" ] || continue
+        check_pattern_safe "$pat" "include/glob"
       done <<< "$pats"
     fi
     allow

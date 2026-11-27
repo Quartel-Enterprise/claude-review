@@ -89,6 +89,12 @@ printf '%s\n' "$version" > "$tmp/extract/.ai-review-version"
 printf '%s\n' "$repo" > "$tmp/extract/.ai-review-repo"
 
 mkdir -p "$(dirname "$install_home")" "$bin_dir"
+if [ -e "$install_home" ] || [ -L "$install_home" ]; then
+  if [ ! -f "$install_home/.ai-review-version" ] && { [ ! -d "$install_home" ] || [ -n "$(ls -A "$install_home" 2> /dev/null)" ]; }; then
+    echo "Refusing to overwrite '$install_home': directory is not empty and does not look like an ai-review installation (.ai-review-version missing)." >&2
+    exit 1
+  fi
+fi
 backup="${install_home}.old.$$"
 rm -rf "$backup"
 [ -e "$install_home" ] && mv "$install_home" "$backup"
@@ -105,6 +111,11 @@ echo "Installed ai-review (${version}) to $bin_dir/ai-review"
 
 if [ "$install_skills" = true ]; then
   "$bin_dir/ai-review" skills install
+fi
+
+if ! command -v jq > /dev/null 2>&1; then
+  echo ""
+  echo "Note: 'jq' is required at runtime by ai-review (install it via brew install jq / apt-get install jq)."
 fi
 
 case ":${PATH}:" in

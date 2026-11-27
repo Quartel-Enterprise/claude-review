@@ -217,7 +217,8 @@ def parse_gemini(exec_path, meta, wanted_model, effort, fixed, show_micro_costs)
         if isinstance(stats, dict) and isinstance(stats.get("models"), dict):
             models_stats = stats["models"]
 
-    if not models_stats and meta_duration is None:
+    meta_status = meta.get("status") if isinstance(meta, dict) else None
+    if not models_stats and (meta_status == "install_failed" or meta_duration is None or meta_duration <= 0):
         return None
 
     rows = []

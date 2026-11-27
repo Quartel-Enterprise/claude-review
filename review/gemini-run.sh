@@ -221,19 +221,23 @@ quarantine_dir="$RUNNER_TEMP/ai-review-quarantine"
 rm -rf "$quarantine_dir"
 mkdir -p "$quarantine_dir"
 restore_quarantine() {
-  if [ -e "$quarantine_dir/.gemini" ]; then
+  if [ -e "$quarantine_dir/.gemini" ] || [ -L "$quarantine_dir/.gemini" ]; then
     rm -rf "$workspace/.gemini"
     mv "$quarantine_dir/.gemini" "$workspace/.gemini"
   fi
-  if [ -e "$quarantine_dir/.env" ]; then
-    rm -f "$workspace/.env"
+  if [ -e "$quarantine_dir/.env" ] || [ -L "$quarantine_dir/.env" ]; then
+    rm -rf "$workspace/.env"
     mv "$quarantine_dir/.env" "$workspace/.env"
   fi
   rm -rf "$quarantine_dir"
 }
 trap restore_quarantine EXIT
-[ -e "$workspace/.gemini" ] && mv "$workspace/.gemini" "$quarantine_dir/.gemini"
-[ -e "$workspace/.env" ] && mv "$workspace/.env" "$quarantine_dir/.env"
+if [ -e "$workspace/.gemini" ] || [ -L "$workspace/.gemini" ]; then
+  mv "$workspace/.gemini" "$quarantine_dir/.gemini"
+fi
+if [ -e "$workspace/.env" ] || [ -L "$workspace/.env" ]; then
+  mv "$workspace/.env" "$quarantine_dir/.env"
+fi
 
 include_args=()
 if [ "$reviewed" != "$workspace" ]; then
@@ -282,6 +286,25 @@ fi
 
 if [ "$rc" -ne 0 ] && [ "$status" = ok ]; then
   status="nonzero_exit"
+fi
+
+# In fix mode, revert modified tracked files if Gemini failed or recorded no "fixed" findings,
+# so partial or unlisted edits never leak into a subsequent Claude commit-fixes.sh run.
+# Only modified files (--diff-filter=M) are reverted so intentionally removed unsafe symlinks stay deleted.
+if [ "$fix" = true ]; then
+  fixed_marked=0
+  if [ "$rc" -eq 0 ] && [ -f "$state/gemini-findings.json" ]; then
+    fixed_marked=$(jq '[.[] | select(type == "object" and .outcome == "fixed")] | length' "$state/gemini-findings.json" 2> /dev/null || echo 0)
+  fi
+  if [ "$rc" -ne 0 ] || [ "$fixed_marked" -eq 0 ]; then
+    if [ -n "$(git -C "$workspace" diff --diff-filter=M --name-only 2> /dev/null)" ]; then
+      echo "::notice::Reverting unconfirmed Gemini working-tree edits (exit=$rc, fixed=$fixed_marked)."
+      git -C "$workspace" -c core.hooksPath=/dev/null -c core.fsmonitor=false \
+        diff --diff-filter=M --name-only -z |
+        git -C "$workspace" -c core.hooksPath=/dev/null -c core.fsmonitor=false \
+          checkout --pathspec-from-file=- --pathspec-file-nul 2> /dev/null || true
+    fi
+  fi
 fi
 
 jq -cn \

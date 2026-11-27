@@ -69,9 +69,10 @@ Nothing is pushed when no finding is marked fixed, when a fix touches `.github`,
 `.gemini`, when the working tree has an untracked file, when a fix adds a token-shaped string, or
 when the branch moved during the review.
 
-For Gemini-only runs with `fix: 'true'`, provide a GitHub App token via `github-token` (along with
-`bot-login` and `bot-id`) if you also use `gate`: pushes made with the default `GITHUB_TOKEN` do
-not trigger pull request check workflows.
+For Gemini-only runs with `fix: 'true'`, either grant `permissions: contents: write` on the job
+(pushes made with the default `GITHUB_TOKEN` will not trigger downstream pull request workflows),
+or provide a GitHub App token via `github-token` (along with `bot-login` and `bot-id`) so pushes
+trigger `gate` and check workflows.
 
 A cheaper, fast Gemini review:
 
