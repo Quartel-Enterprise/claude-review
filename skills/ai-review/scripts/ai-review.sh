@@ -32,7 +32,7 @@ Review options:
   -m, --model <model>          Model alias/id for the selected single provider (or Gemini when both)
       --gemini-model <model>   Gemini model: neon (default), carbon, argon, hydrogen, or full id
       --claude-model <model>   Claude model: opus (default), sonnet, haiku, or full id
-  -e, --effort <level>         Effort: low, medium, high (default), xhigh, max
+  -e, --effort <level>         Effort: low, medium, high (default), xhigh, max (or future level)
       --gemini-effort <level>  Effort override for Gemini
       --claude-effort <level>  Effort override for Claude
       --gemini-engine <eng>    agy (default, Google subscription) or gemini-cli (GEMINI_API_KEY)
@@ -165,16 +165,22 @@ cmd_skills() {
 
   case "$action" in
     install | add)
-      local target
+      local targets target
+      targets=$(resolve_skill_targets "$agent" "$project") || return $?
       while IFS= read -r target; do
         [ -n "$target" ] || continue
         mkdir -p "$(dirname "$target")"
+        # Remove existing non-symlink directory/file so ln -sfn never nests a symlink inside it.
+        if [ -e "$target" ] && [ ! -L "$target" ]; then
+          rm -rf "$target"
+        fi
         ln -sfn "$skill_dir" "$target"
         echo "✓ Linked skill -> $target"
-      done < <(resolve_skill_targets "$agent" "$project")
+      done <<< "$targets"
       ;;
     remove | uninstall)
-      local target
+      local targets target
+      targets=$(resolve_skill_targets "$agent" "$project") || return $?
       while IFS= read -r target; do
         [ -n "$target" ] || continue
         if [ -L "$target" ] || [ -e "$target" ]; then
@@ -183,7 +189,7 @@ cmd_skills() {
         else
           echo "- Not installed: $target"
         fi
-      done < <(resolve_skill_targets "$agent" "$project")
+      done <<< "$targets"
       ;;
     status | list)
       echo "Skill source: $skill_dir"
@@ -206,7 +212,6 @@ cmd_skills() {
   esac
 }
 
-# Dispatch management subcommands before review flag parsing.
 case "${1:-}" in
   update) shift; cmd_update "$@"; exit $? ;;
   skills) shift; cmd_skills "$@"; exit $? ;;
@@ -261,8 +266,9 @@ done
 run_claude=false
 run_gemini=false
 canonical=()
+raw_list=()
 IFS=',' read -r -a raw_list <<< "$providers_raw"
-for item in "${raw_list[@]}"; do
+for item in ${raw_list[@]+"${raw_list[@]}"}; do
   p=$(lower "$item" | xargs)
   [ -n "$p" ] || continue
   case "$p" in
@@ -304,9 +310,13 @@ gemini_effort=${gemini_effort:-$effort}
 claude_effort=${claude_effort:-$effort}
 
 for eff in "$effort" "$gemini_effort" "$claude_effort"; do
-  case "$eff" in
+  if ! [[ "$eff" =~ ^[A-Za-z0-9-]+$ ]]; then
+    echo "Invalid effort '$eff': must match [A-Za-z0-9-]+" >&2
+    exit 2
+  fi
+  case "$(lower "$eff")" in
     low | medium | high | xhigh | max) ;;
-    *) echo "Invalid effort '$eff': use low, medium, high, xhigh, or max." >&2; exit 2 ;;
+    *) echo "Warning: '$eff' is not one of the standard effort levels (low, medium, high, xhigh, max); passing through." >&2 ;;
   esac
 done
 
@@ -337,10 +347,11 @@ resolve_agy_gemini_model() {
     high) suffix="high" ;;
     xhigh | max)
       case "$base" in
-        gemini-4-neon | gemini-4-hydrogen) suffix="xhigh" ;;
-        *) suffix="high" ;;
+        gemini-4-carbon | gemini-4-argon) suffix="high" ;;
+        *) suffix="xhigh" ;;
       esac
       ;;
+    *) suffix="$e" ;;
   esac
   echo "${base}-${suffix}"
 }
@@ -359,6 +370,7 @@ resolve_agy_claude_model() {
     low) suffix="low" ;;
     medium) suffix="medium" ;;
     high | xhigh | max) suffix="high" ;;
+    *) suffix="$e" ;;
   esac
   echo "${base}-${suffix}"
 }
@@ -410,14 +422,20 @@ if [ ! -s "$diff_file" ]; then
 fi
 
 build_prompt() {
-  local out_file=$1 eff=$2
-  python3 - "$out_file" "$diff_file" "$target_desc" "$eff" "$max_findings" "$fix" "$extra_instructions" <<'PY'
+  local out_file=$1 eff=$2 max_bytes=${3:-120000}
+  python3 - "$out_file" "$diff_file" "$target_desc" "$eff" "$max_findings" "$fix" "$extra_instructions" "$max_bytes" <<'PY'
 import pathlib, sys
 
-out_path, diff_path, target_desc, effort, max_findings, fix_str, extra = sys.argv[1:8]
-diff_text = pathlib.Path(diff_path).read_text(encoding="utf-8", errors="replace")
-if len(diff_text) > 120000:
-    diff_text = diff_text[:120000] + "\n... [diff truncated; inspect remaining files directly with read tools] ...\n"
+out_path, diff_path, target_desc, effort, max_findings, fix_str, extra, max_bytes_s = sys.argv[1:9]
+max_bytes = int(max_bytes_s)
+raw_bytes = pathlib.Path(diff_path).read_bytes()
+if len(raw_bytes) > max_bytes:
+    diff_text = raw_bytes[:max_bytes].decode("utf-8", errors="ignore") + (
+        f"\n... [diff truncated at {max_bytes} bytes; full diff is at `{diff_path}` — "
+        "inspect remaining files directly with read tools] ...\n"
+    )
+else:
+    diff_text = raw_bytes.decode("utf-8", errors="replace")
 
 fix = fix_str == "true"
 if fix:
@@ -463,12 +481,13 @@ run_gemini_provider() {
   local raw_out="$state/gemini-raw.txt"
   local err_out="$state/gemini-err.log"
   local json_out="$state/gemini-out.json"
-  build_prompt "$prompt_file" "$gemini_effort"
 
   local start_ts end_ts dur rc=0 resolved_model="" is_sub=false
   start_ts=$(date +%s)
   if [ "$gemini_engine" = agy ]; then
-    command -v agy > /dev/null 2>&1 || { echo "agy CLI not found in PATH (install Antigravity CLI or use --gemini-engine gemini-cli)." >&2; return 1; }
+    command -v agy > /dev/null 2>&1 || { echo "agy CLI not found in PATH (install Antigravity CLI or use --gemini-engine gemini-cli)." >&2; echo 1 > "$state/gemini.rc"; return 1; }
+    # Cap inline diff at 64 KiB bytes for argv safety; --add-dir exposes full review.diff.
+    build_prompt "$prompt_file" "$gemini_effort" 65536
     local -a mode_args=()
     resolved_model=$(resolve_agy_gemini_model "$gemini_model" "$gemini_effort")
     is_sub=true
@@ -476,6 +495,7 @@ run_gemini_provider() {
     echo "[gemini] Running via agy (model=$resolved_model)..." >&2
     agy \
       --model "$resolved_model" \
+      --add-dir "$state" \
       ${mode_args[@]+"${mode_args[@]}"} \
       --sandbox \
       --output-format json \
@@ -485,23 +505,30 @@ run_gemini_provider() {
       jq -r '.response // ""' "$json_out" > "$raw_out" 2> /dev/null || cp "$json_out" "$raw_out"
     fi
   elif [ "$gemini_engine" = gemini-cli ]; then
-    command -v gemini > /dev/null 2>&1 || { echo "gemini CLI not found in PATH." >&2; return 1; }
+    command -v gemini > /dev/null 2>&1 || { echo "gemini CLI not found in PATH." >&2; echo 1 > "$state/gemini.rc"; return 1; }
+    build_prompt "$prompt_file" "$gemini_effort" 200000
     resolved_model=$(resolve_gemini_api_model "$gemini_model")
-    echo "[gemini] Running via gemini-cli (model=$resolved_model)..." >&2
+    local approval_mode="plan"
+    [ "$fix" = true ] && approval_mode="auto_edit"
+    echo "[gemini] Running via gemini-cli (model=$resolved_model, approval=$approval_mode)..." >&2
     gemini --model "$resolved_model" \
+      --approval-mode "$approval_mode" \
       --output-format json \
-      --prompt "$(cat "$prompt_file")" \
+      --prompt "Follow the code review instructions provided on stdin." \
+      < "$prompt_file" \
       > "$json_out" 2> "$err_out" || rc=$?
     if [ -s "$json_out" ]; then
       jq -r '.response // ""' "$json_out" > "$raw_out" 2> /dev/null || cp "$json_out" "$raw_out"
     fi
   else
     echo "Unknown --gemini-engine '$gemini_engine': use agy or gemini-cli." >&2
-    return 1
+    echo 2 > "$state/gemini.rc"
+    return 2
   fi
   end_ts=$(date +%s)
   dur=$((end_ts - start_ts))
   [ "$dur" -ge 0 ] || dur=0
+  echo "$rc" > "$state/gemini.rc"
 
   if [ "$gemini_engine" = agy ] && [ -s "$json_out" ] && jq -e '.usage' "$json_out" > /dev/null 2>&1; then
     jq -cn \
@@ -548,6 +575,7 @@ run_gemini_provider() {
   fi
   echo "[gemini] Finished in ${dur}s (exit=$rc)" >&2
   [ "$rc" -eq 0 ] || { tail -n 10 "$err_out" >&2 || true; }
+  return "$rc"
 }
 
 run_claude_provider() {
@@ -555,38 +583,44 @@ run_claude_provider() {
   local raw_out="$state/claude-raw.txt"
   local err_out="$state/claude-err.log"
   local json_out="$state/claude-out.json"
-  build_prompt "$prompt_file" "$claude_effort"
 
   local start_ts end_ts dur rc=0 resolved_model="" is_sub=true
   start_ts=$(date +%s)
   if [ "$claude_engine" = claude ]; then
-    command -v claude > /dev/null 2>&1 || { echo "claude CLI not found in PATH (install Claude Code or use --claude-engine agy)." >&2; return 1; }
+    command -v claude > /dev/null 2>&1 || { echo "claude CLI not found in PATH (install Claude Code or use --claude-engine agy)." >&2; echo 1 > "$state/claude.rc"; return 1; }
+    build_prompt "$prompt_file" "$claude_effort" 200000
     resolved_model=$claude_model
     [ -n "${ANTHROPIC_API_KEY:-}" ] && is_sub=false
     local tools_arg
+    local -a perm_args=()
     if [ "$fix" = true ]; then
       tools_arg="Read,Edit,Grep,Glob"
+      perm_args=(--permission-mode acceptEdits)
     else
       tools_arg="Read,Grep,Glob"
     fi
     echo "[claude] Running via claude CLI (model=$resolved_model, effort=$claude_effort)..." >&2
+    # Feed prompt on stdin so large diffs never hit Linux's 128 KiB MAX_ARG_STRLEN.
     claude --print \
       --model "$resolved_model" \
       --tools "$tools_arg" \
+      ${perm_args[@]+"${perm_args[@]}"} \
       --output-format json \
-      "$(cat "$prompt_file")" \
+      < "$prompt_file" \
       > "$json_out" 2> "$err_out" || rc=$?
     if [ -s "$json_out" ]; then
       jq -r '.result // ""' "$json_out" > "$raw_out" 2> /dev/null || cp "$json_out" "$raw_out"
     fi
   elif [ "$claude_engine" = agy ]; then
-    command -v agy > /dev/null 2>&1 || { echo "agy CLI not found in PATH." >&2; return 1; }
+    command -v agy > /dev/null 2>&1 || { echo "agy CLI not found in PATH." >&2; echo 1 > "$state/claude.rc"; return 1; }
+    build_prompt "$prompt_file" "$claude_effort" 65536
     local -a mode_args=()
     resolved_model=$(resolve_agy_claude_model "$claude_model" "$claude_effort")
     [ "$fix" = true ] && mode_args=(--mode accept-edits)
     echo "[claude] Running via agy (model=$resolved_model)..." >&2
     agy \
       --model "$resolved_model" \
+      --add-dir "$state" \
       ${mode_args[@]+"${mode_args[@]}"} \
       --sandbox \
       --output-format json \
@@ -597,11 +631,13 @@ run_claude_provider() {
     fi
   else
     echo "Unknown --claude-engine '$claude_engine': use claude or agy." >&2
-    return 1
+    echo 2 > "$state/claude.rc"
+    return 2
   fi
   end_ts=$(date +%s)
   dur=$((end_ts - start_ts))
   [ "$dur" -ge 0 ] || dur=0
+  echo "$rc" > "$state/claude.rc"
 
   if [ "$claude_engine" = claude ] && [ -s "$json_out" ] && jq -e '.total_cost_usd // .modelUsage' "$json_out" > /dev/null 2>&1; then
     jq -cn \
@@ -645,6 +681,7 @@ run_claude_provider() {
   fi
   echo "[claude] Finished in ${dur}s (exit=$rc)" >&2
   [ "$rc" -eq 0 ] || { tail -n 10 "$err_out" >&2 || true; }
+  return "$rc"
 }
 
 wall_start=$(date +%s)
@@ -663,15 +700,23 @@ wall_end=$(date +%s)
 wall_seconds=$((wall_end - wall_start))
 [ "$wall_seconds" -ge 0 ] || wall_seconds=0
 
+any_provider_ok=false
 merge_args=()
 stats_files=()
 if [ "$run_gemini" = true ]; then
+  [ "$(cat "$state/gemini.rc" 2> /dev/null || echo 1)" -eq 0 ] && any_provider_ok=true
   [ -f "$state/gemini-findings.json" ] && merge_args+=("gemini:$state/gemini-findings.json")
   [ -f "$state/gemini.stats.json" ] && stats_files+=("$state/gemini.stats.json")
 fi
 if [ "$run_claude" = true ]; then
+  [ "$(cat "$state/claude.rc" 2> /dev/null || echo 1)" -eq 0 ] && any_provider_ok=true
   [ -f "$state/claude-findings.json" ] && merge_args+=("claude:$state/claude-findings.json")
   [ -f "$state/claude.stats.json" ] && stats_files+=("$state/claude.stats.json")
+fi
+
+if [ "$any_provider_ok" != true ]; then
+  echo "All enabled review providers failed." >&2
+  exit 1
 fi
 
 stats_json='[]'
@@ -686,9 +731,17 @@ fi
 
 if [ "$post_pr" = true ]; then
   repo_nwo=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
-  GITHUB_REPOSITORY="$repo_nwo" \
-    PROVIDERS="$providers_csv" \
-    "$scripts_dir/post-review.sh" "$pr_number" <<< "$merged"
+  if [ "$json_output" = true ]; then
+    GITHUB_REPOSITORY="$repo_nwo" \
+      GITHUB_WORKSPACE="$workspace" \
+      PROVIDERS="$providers_csv" \
+      "$scripts_dir/post-review.sh" "$pr_number" <<< "$merged" >&2
+  else
+    GITHUB_REPOSITORY="$repo_nwo" \
+      GITHUB_WORKSPACE="$workspace" \
+      PROVIDERS="$providers_csv" \
+      "$scripts_dir/post-review.sh" "$pr_number" <<< "$merged"
+  fi
 fi
 
 if [ "$json_output" = true ]; then

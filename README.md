@@ -42,7 +42,9 @@ aren't reviewed again (see [Reviewing again](docs/review.md#reviewing-again)).
   - **Claude (`providers: claude`):** either `CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token`) or
     `ANTHROPIC_API_KEY` from the [Claude Console](https://console.anthropic.com/), plus the
     [Claude GitHub App](https://github.com/apps/claude) installed on the repository (or
-    [your own GitHub App](docs/review.md#your-own-github-app) via `github-token`).
+    [your own GitHub App](docs/review.md#your-own-github-app) via `github-token`). When using the
+    Claude GitHub App without `github-token`, the job also needs `permissions: id-token: write` to
+    exchange the workflow's OIDC token.
   - **Both (`providers: claude,gemini`):** credentials for both providers.
 - An Ubuntu runner (`ubuntu-latest`).
 
@@ -92,7 +94,21 @@ jobs:
 
 ### Both Claude and Gemini on the same pull request
 
+When `claude` is enabled without `github-token`, add `id-token: write` to the job's `permissions`:
+
 ```yaml
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: write
+      issues: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
       - uses: Quartel-Enterprise/ai-review/review@2.0.0
         with:
           providers: claude,gemini

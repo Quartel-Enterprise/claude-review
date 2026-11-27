@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # Runs a Gemini CLI headless review session with the same security model as Claude:
 # - Installs a pinned @google/gemini-cli version outside the checkout.
-# - Configures system-level settings (GEMINI_CLI_SYSTEM_SETTINGS_PATH) with folderTrust enabled
-#   so any .gemini/settings.json inside an untrusted PR checkout is ignored.
-# - Enforces tool restrictions with BOTH the Policy Engine (TOML) and a BeforeTool hook
-#   (gemini-guard.sh), plus environmentVariableRedaction for subprocesses.
-# - Captures JSON output and stderr outside the checkout so raw model output never reaches public logs.
-# - Records duration, model, effort, and extracted findings (tagged with provider="gemini") in STATE.
+# - Quarantines any .gemini/ directory and .env file in the PR checkout during the run so a
+#   malicious PR cannot inject settings, hooks, MCP servers, policies, or env overrides.
+# - Configures system-level settings (GEMINI_CLI_SYSTEM_SETTINGS_PATH) with Policy Engine (TOML),
+#   a BeforeTool hook (gemini-guard.sh), and environmentVariableRedaction (blocking GEMINI_API_KEY
+#   while allowing GH_TOKEN for read-only gh commands).
+# - Passes the rendered prompt over stdin (avoiding Linux's 128 KiB argv limit) and passes
+#   --include-directories when REVIEWED_DIR differs from GITHUB_WORKSPACE (fix mode).
+# - Exits non-zero when installation or Gemini CLI fails so single-provider runs fail cleanly
+#   (while multi-provider runs use continue-on-error in review/action.yml).
 set -uo pipefail
 
 dir=$(cd "$(dirname "$0")" && pwd)
@@ -20,7 +23,6 @@ export MAX_FINDINGS="${MAX_FINDINGS:-all}"
 raw_model=${GEMINI_MODEL:-neon}
 cli_version=${GEMINI_CLI_VERSION:-0.71.1}
 
-# Resolve Gemini model aliases to full API model IDs.
 resolve_model() {
   case "${1,,}" in
     "" | neon) echo "gemini-4-neon" ;;
@@ -31,7 +33,8 @@ resolve_model() {
   esac
 }
 
-# Map review effort to Gemini thinkingLevel, respecting per-model ceilings.
+# Map review effort to Gemini thinkingLevel. Only models known to cap at HIGH (carbon, argon) are
+# clamped from XHIGH/MAX -> HIGH; unknown future models pass XHIGH or custom levels through.
 resolve_thinking_level() {
   local model=$1 eff=$2
   case "${eff,,}" in
@@ -40,11 +43,11 @@ resolve_thinking_level() {
     high) echo "HIGH" ;;
     xhigh | max)
       case "${model,,}" in
-        gemini-4-neon | gemini-4-hydrogen) echo "XHIGH" ;;
-        *) echo "HIGH" ;;
+        gemini-4-carbon | gemini-4-argon) echo "HIGH" ;;
+        *) echo "XHIGH" ;;
       esac
       ;;
-    *) echo "HIGH" ;;
+    *) tr '[:lower:]' '[:upper:]' <<< "$eff" ;;
   esac
 }
 
@@ -53,7 +56,6 @@ thinking_level=$(resolve_thinking_level "$model" "$effort")
 
 echo "Running Gemini review with model=$model (thinkingLevel=$thinking_level, effort=$effort)"
 
-# Install pinned @google/gemini-cli outside the checkout so PR contents cannot affect it.
 cli_prefix="$RUNNER_TEMP/ai-review-gemini-cli"
 gemini_bin="$cli_prefix/node_modules/.bin/gemini"
 if [ ! -x "$gemini_bin" ]; then
@@ -66,7 +68,6 @@ if [ ! -x "$gemini_bin" ]; then
   fi
 fi
 
-# Generate read-only TOML policy and system settings outside the checkout.
 cfg_dir="$RUNNER_TEMP/ai-review-gemini-config"
 if [ -d "$cfg_dir" ]; then
   chmod -R u+w "$cfg_dir"
@@ -122,7 +123,8 @@ TOML
   fi
 } > "$policy_file"
 
-guard_cmd="$dir/gemini-guard.sh $state $workspace $reviewed $fix"
+# Shell-quote every argument so paths containing spaces or special characters cannot shift $1..$4.
+guard_cmd=$(printf '%q %q %q %q %q' "$dir/gemini-guard.sh" "$state" "$workspace" "$reviewed" "$fix")
 jq -n \
   --arg model "$model" \
   --arg thinking "$thinking_level" \
@@ -130,7 +132,11 @@ jq -n \
   --arg guard "$guard_cmd" \
   '{
     security: {
-      environmentVariableRedaction: { enabled: true }
+      environmentVariableRedaction: {
+        enabled: true,
+        allowed: ["GH_TOKEN", "GH_REPO"],
+        blocked: ["GEMINI_API_KEY"]
+      }
     },
     adminPolicyPaths: [$policy],
     modelConfigs: {
@@ -165,7 +171,6 @@ jq -n \
 
 chmod -R a-w "$cfg_dir"
 
-# Render the review prompt from gemini-prompt.md without shell-expanding untrusted text.
 prompt_file="$state/gemini-prompt.txt"
 python3 - "$dir/gemini-prompt.md" "$prompt_file" <<'PY'
 import os, pathlib, sys
@@ -209,23 +214,35 @@ PY
 exec_file="$state/gemini-execution.json"
 stderr_file="$state/gemini-stderr.log"
 
-# Quarantine any .gemini directory in the PR checkout before running Gemini CLI so a malicious PR
-# cannot inject .gemini/settings.json, hooks, MCP servers, or policies, then restore it on exit.
-quarantine_gemini="$RUNNER_TEMP/ai-review-quarantined-gemini"
-rm -rf "$quarantine_gemini"
+# Quarantine both .gemini/ and root .env in the PR checkout before running Gemini CLI so a
+# malicious PR cannot inject settings, hooks, MCP servers, policies, or env overrides (e.g.
+# custom base URLs or proxies), then restore them on exit.
+quarantine_dir="$RUNNER_TEMP/ai-review-quarantine"
+rm -rf "$quarantine_dir"
+mkdir -p "$quarantine_dir"
 restore_quarantine() {
-  if [ -e "$quarantine_gemini" ]; then
+  if [ -e "$quarantine_dir/.gemini" ]; then
     rm -rf "$workspace/.gemini"
-    mv "$quarantine_gemini" "$workspace/.gemini"
+    mv "$quarantine_dir/.gemini" "$workspace/.gemini"
   fi
+  if [ -e "$quarantine_dir/.env" ]; then
+    rm -f "$workspace/.env"
+    mv "$quarantine_dir/.env" "$workspace/.env"
+  fi
+  rm -rf "$quarantine_dir"
 }
 trap restore_quarantine EXIT
-if [ -e "$workspace/.gemini" ]; then
-  mv "$workspace/.gemini" "$quarantine_gemini"
+[ -e "$workspace/.gemini" ] && mv "$workspace/.gemini" "$quarantine_dir/.gemini"
+[ -e "$workspace/.env" ] && mv "$workspace/.env" "$quarantine_dir/.env"
+
+include_args=()
+if [ "$reviewed" != "$workspace" ]; then
+  include_args=(--include-directories "$reviewed")
 fi
 
 start_ts=$(date +%s)
 rc=0
+# Pass prompt via stdin (avoiding Linux's 128 KiB MAX_ARG_STRLEN argv limit).
 GEMINI_CLI_TRUST_WORKSPACE=true \
   GEMINI_CLI_SYSTEM_SETTINGS_PATH="$settings_file" \
   "$gemini_bin" \
@@ -233,7 +250,9 @@ GEMINI_CLI_TRUST_WORKSPACE=true \
     --policy "$policy_file" \
     --approval-mode yolo \
     --output-format json \
-    --prompt "$(cat "$prompt_file")" \
+    ${include_args[@]+"${include_args[@]}"} \
+    --prompt "Follow the code review instructions provided on stdin." \
+    < "$prompt_file" \
     > "$exec_file" 2> "$stderr_file" || rc=$?
 end_ts=$(date +%s)
 restore_quarantine
@@ -291,5 +310,6 @@ if [ "$rc" -ne 0 ]; then
     err_hint=$(grep -m1 '"message":' "$stderr_file" 2> /dev/null | "$dir/post-review.sh" --redact | cut -c1-240 || true)
   fi
   echo "::warning::Gemini CLI exited with code $rc (status=$status).${err_hint:+ $err_hint}"
+  exit "$rc"
 fi
 exit 0

@@ -53,7 +53,7 @@ def lookup_rate(model_name):
     norm = (model_name or "").lower()
     if "/" in norm:
         norm = norm.split("/", 1)[1]
-    for prefix, rates in MODEL_PRICING_PER_1M.items():
+    for prefix, rates in sorted(MODEL_PRICING_PER_1M.items(), key=lambda kv: -len(kv[0])):
         if norm == prefix or norm.startswith(prefix + "-"):
             return rates
     return None

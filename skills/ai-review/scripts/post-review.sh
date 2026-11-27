@@ -20,8 +20,8 @@ set -euo pipefail
 # x-access-token:...), and long Basic/Bearer values containing at least one digit.
 redact() {
   perl -pe 's/sk-ant-[A-Za-z0-9_-]{8,}/[redacted]/g;
-    s/(?:AIza[0-9A-Za-z_-]{20,}|\bAQ\.[0-9A-Za-z_-]{20,})/[redacted]/g;
-    s/\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}/[redacted]/g;
+    s/(?:AIza[0-9A-Za-z_-]{20,}|(?:(?<=\\[nrtfb])|(?<=\\u[0-9a-fA-F]{4})|\b)AQ\.[0-9A-Za-z_-]{20,})/[redacted]/g;
+    s/(?:(?<=\\[nrtfb])|(?<=\\u[0-9a-fA-F]{4})|\b)sk-(?:proj-)?[A-Za-z0-9_-]{20,}/[redacted]/g;
     s/(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/[redacted]/g;
     s/eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/[redacted]/g;
     s/eC1hY2Nlc3MtdG9rZW46[A-Za-z0-9+\/=]*/[redacted]/g;

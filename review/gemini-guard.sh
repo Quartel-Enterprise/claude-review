@@ -3,11 +3,14 @@
 # Enforces the same security boundary as Claude's bash-guard.sh and Read/Edit rules:
 # - run_shell_command: single plain line of the allowlisted read-only gh/git commands, no quoting,
 #   expansion, pipes, redirections, or gh --jq/-q/--template/-t.
-# - read_file / grep_search / glob / list_directory: target path must stay inside WORKSPACE or
-#   REVIEWED_DIR, never entering .git, /proc, /sys, /etc, /tmp, RUNNER_TEMP, or credential files.
+# - read_file / grep_search / glob / list_directory: every path parameter must stay inside
+#   WORKSPACE or REVIEWED_DIR, never entering .git, /proc, /sys, /etc, /tmp, RUNNER_TEMP, or
+#   credential files; glob/grep patterns and includes cannot traverse upward ('..'), start with
+#   '/' or '~', or target '.git'.
 # - replace: allowed only when FIX=true, on an existing file inside WORKSPACE, never under .git,
 #   .github, .claude, .gemini, or .agent-memory.
 # - Any other tool (write_file, web_fetch, google_web_search, etc.): denied.
+# - Fails closed on any jq parse error.
 #
 # Gemini CLI BeforeTool protocol: reads JSON from stdin, writes JSON decision to stdout, exits 0.
 # Usage: gemini-guard.sh <state dir> <workspace> <reviewed dir> <fix: true|false>
@@ -35,7 +38,7 @@ allow() {
   exit 0
 }
 
-tool_name=$(jq -r '.tool_name // ""' <<< "$input" 2> /dev/null) || deny "Tool(?)" "the guard couldn't read the tool call"
+tool_name=$(jq -er '.tool_name | strings' <<< "$input" 2> /dev/null) || deny "Tool(?)" "the guard couldn't read the tool call"
 [ -n "$tool_name" ] || deny "Tool(?)" "missing tool name"
 
 resolve_path() {
@@ -56,15 +59,15 @@ is_inside() {
   local target=$1 dir=$2
   [ -n "$dir" ] || return 1
   local real_dir
-  real_dir=$(resolve_path "$dir" "/")
+  real_dir=$(resolve_path "$dir" "/") || return 1
   [ "$target" = "$real_dir" ] || [[ "$target" == "$real_dir/"* ]]
 }
 
 check_read_path() {
   local raw=$1
   local resolved ws_real
-  ws_real=$(resolve_path "$workspace" "/")
-  resolved=$(resolve_path "$raw" "$ws_real")
+  ws_real=$(resolve_path "$workspace" "/") || deny "$tool_name" "couldn't resolve workspace"
+  resolved=$(resolve_path "$raw" "$ws_real") || deny "$tool_name" "couldn't resolve path"
   case "$resolved" in
     "$ws_real/.git" | "$ws_real/.git/"*)
       deny "$tool_name" "reading .git is not allowed"
@@ -79,12 +82,34 @@ check_read_path() {
   deny "$tool_name" "path '$raw' is outside the checkout"
 }
 
+check_pattern_safe() {
+  local raw=$1 field=$2
+  [ -n "$raw" ] || return 0
+  case "$raw" in
+    /* | ~*)
+      deny "$tool_name" "$field cannot start with '/' or '~'"
+      ;;
+    .. | ../* | */.. | */../*)
+      deny "$tool_name" "$field cannot traverse parent directories ('..')"
+      ;;
+    .git | .git/* | */.git | */.git/*)
+      deny "$tool_name" "$field cannot target .git"
+      ;;
+  esac
+}
+
+# Extract every non-empty string value for the listed tool_input keys (fails closed on jq errors).
+extract_fields() {
+  local jq_filter=$1
+  jq -r "(.tool_input // {} | objects) | $jq_filter" <<< "$input" 2> /dev/null
+}
+
 check_edit_path() {
   local raw=$1
   [ -n "$raw" ] || deny "$tool_name" "missing file_path"
   local resolved ws_real
-  ws_real=$(resolve_path "$workspace" "/")
-  resolved=$(resolve_path "$raw" "$ws_real")
+  ws_real=$(resolve_path "$workspace" "/") || deny "$tool_name" "couldn't resolve workspace"
+  resolved=$(resolve_path "$raw" "$ws_real") || deny "$tool_name" "couldn't resolve path"
   if ! is_inside "$resolved" "$ws_real"; then
     deny "$tool_name" "path '$raw' is outside the checkout"
   fi
@@ -152,24 +177,41 @@ case "$tool_name" in
       esac
     done
 
-    dir_path=$(jq -r '.tool_input.dir_path // ""' <<< "$input" 2> /dev/null)
-    if [ -n "$dir_path" ]; then
-      check_read_path "$dir_path"
-    fi
+    dir_paths=$(extract_fields '[(.dir_path, .directory, .cwd) | strings | select(length > 0)] | .[]') ||
+      deny "$(bash_label)" "couldn't inspect shell directory parameters"
+    while IFS= read -r dp; do
+      [ -n "$dp" ] || continue
+      check_read_path "$dp"
+    done <<< "$dir_paths"
     allow
     ;;
 
   read_file)
-    path=$(jq -r '.tool_input.file_path // .tool_input.path // ""' <<< "$input" 2> /dev/null)
-    [ -n "$path" ] || deny "$tool_name" "missing file path"
-    check_read_path "$path"
+    paths=$(extract_fields '[(.file_path, .path) | strings | select(length > 0)] | .[]') ||
+      deny "$tool_name" "couldn't inspect file path"
+    [ -n "$paths" ] || deny "$tool_name" "missing file path"
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      check_read_path "$p"
+    done <<< "$paths"
     allow
     ;;
 
   grep_search | glob | list_directory)
-    path=$(jq -r '.tool_input.dir_path // .tool_input.path // ""' <<< "$input" 2> /dev/null)
-    if [ -n "$path" ]; then
-      check_read_path "$path"
+    paths=$(extract_fields '[(.dir_path, .path, .directory) | strings | select(length > 0)] | .[]') ||
+      deny "$tool_name" "couldn't inspect directory parameters"
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      check_read_path "$p"
+    done <<< "$paths"
+
+    if [ "$tool_name" = glob ] || [ "$tool_name" = grep_search ]; then
+      pats=$(extract_fields '[(.pattern, .include) | strings | select(length > 0)] | .[]') ||
+        deny "$tool_name" "couldn't inspect pattern/include parameters"
+      while IFS= read -r pat; do
+        [ -n "$pat" ] || continue
+        check_pattern_safe "$pat" "pattern/include"
+      done <<< "$pats"
     fi
     allow
     ;;
@@ -183,8 +225,13 @@ case "$tool_name" in
     if [ "$fix" != true ]; then
       deny "$tool_name" "editing files is disabled unless fix is true"
     fi
-    path=$(jq -r '.tool_input.file_path // .tool_input.path // ""' <<< "$input" 2> /dev/null)
-    check_edit_path "$path"
+    paths=$(extract_fields '[(.file_path, .path) | strings | select(length > 0)] | .[]') ||
+      deny "$tool_name" "couldn't inspect file path"
+    [ -n "$paths" ] || deny "$tool_name" "missing file path"
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      check_edit_path "$p"
+    done <<< "$paths"
     allow
     ;;
 

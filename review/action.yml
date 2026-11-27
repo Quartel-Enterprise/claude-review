@@ -189,9 +189,13 @@ runs:
         [[ "$GEMINI_CLI_VERSION" =~ ^[A-Za-z0-9._-]+$ ]] || error "gemini-cli-version '$GEMINI_CLI_VERSION' isn't a valid version."
 
         check_effort() {
-          case "$2" in
+          if ! [[ "$2" =~ ^[A-Za-z0-9-]+$ ]]; then
+            error "$1 '$2' isn't a valid effort level."
+            return
+          fi
+          case "${2,,}" in
             low | medium | high | xhigh | max) ;;
-            *) error "$1 '$2' isn't one of low, medium, high, xhigh and max." ;;
+            *) echo "::warning::$1 '$2' is not one of the standard levels (low, medium, high, xhigh, max); passing it through to the provider." ;;
           esac
         }
         check_effort "effort" "$EFFORT"
@@ -463,6 +467,7 @@ runs:
     - id: gemini
       name: Run Gemini review
       if: steps.event.outputs.review == 'true' && steps.config.outputs.run-gemini == 'true'
+      continue-on-error: ${{ steps.config.outputs.run-claude == 'true' }}
       shell: bash
       env:
         GEMINI_API_KEY: ${{ inputs.gemini-api-key }}
@@ -736,7 +741,7 @@ runs:
 
     - id: summary
       name: Comment what the review cost and took
-      if: ${{ !cancelled() && steps.event.outputs.review == 'true' }}
+      if: ${{ !cancelled() && steps.event.outputs.review == 'true' && steps.tools.outputs.dir != '' }}
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
@@ -802,3 +807,20 @@ runs:
         sort <<< "$denied" | uniq -c | while read -r count tool; do
           echo "::warning::The review was denied $tool ($count time(s))."
         done
+
+    - name: Fail when every enabled provider failed
+      if: ${{ !cancelled() && steps.event.outputs.review == 'true' }}
+      shell: bash
+      env:
+        RUN_CLAUDE: ${{ steps.config.outputs.run-claude }}
+        RUN_GEMINI: ${{ steps.config.outputs.run-gemini }}
+        CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
+        GEMINI_OUTCOME: ${{ steps.gemini.outcome }}
+      run: |
+        any_ok=false
+        [ "$RUN_GEMINI" = true ] && [ "$GEMINI_OUTCOME" = success ] && any_ok=true
+        [ "$RUN_CLAUDE" = true ] && [ "$CLAUDE_OUTCOME" = success ] && any_ok=true
+        if [ "$any_ok" != true ]; then
+          echo "::error::Every enabled AI review provider failed."
+          exit 1
+        fi

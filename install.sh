@@ -38,6 +38,10 @@ done
 
 [[ "$repo" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo "Invalid repo '$repo'." >&2; exit 2; }
 
+# Strip trailing slashes so backup paths never resolve inside install_home.
+while [[ "$install_home" == */ && "$install_home" != "/" ]]; do install_home=${install_home%/}; done
+while [[ "$bin_dir" == */ && "$bin_dir" != "/" ]]; do bin_dir=${bin_dir%/}; done
+
 for cmd in curl tar python3; do
   command -v "$cmd" > /dev/null 2>&1 || { echo "Missing required command: $cmd" >&2; exit 1; }
 done

@@ -16,10 +16,11 @@ the review to quote one in a public comment or commit. So:
     `grep_search`, `glob`, and `list_directory` and denies anything outside the checkout or reviewed
     commit copy, as well as `.git`. Tools like `write_file`, `web_fetch`, `google_web_search`,
     `save_memory`, `activate_skill`, and `mcp_*` are explicitly denied.
-- **Untrusted PR settings ignored:** for Gemini, any `.gemini/` directory in the PR checkout is
-  quarantined outside the workspace for the duration of the run (and restored on exit), while
-  `GEMINI_CLI_SYSTEM_SETTINGS_PATH` points to a read-only settings file outside the checkout, so a
-  malicious PR's `.gemini/settings.json`, hooks, MCP servers, or policies cannot load.
+- **Untrusted PR settings & `.env` ignored:** for Gemini, any `.gemini/` directory and root `.env`
+  file in the PR checkout are quarantined outside the workspace for the duration of the run (and
+  restored on exit), while `GEMINI_CLI_SYSTEM_SETTINGS_PATH` points to a read-only settings file
+  outside the checkout, so a malicious PR's `.gemini/settings.json`, `.env` overrides (such as
+  custom base URLs or proxies), hooks, MCP servers, or policies cannot load.
 - **Shell allowlist & guard:** both Claude (`review/bash-guard.sh`) and Gemini
   (`review/gemini-guard.sh`) permit only `gh pr view`, `gh pr diff`, `gh pr list`, `gh issue view`,
   `gh issue list`, `gh search`, `git status`, and `git branch --show-current` — each as one plain

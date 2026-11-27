@@ -80,8 +80,8 @@ def lookup_gemini_rate(model_name):
         normalized = normalized.split("/", 1)[1]
     if normalized in GEMINI_PRICING_PER_1M:
         return GEMINI_PRICING_PER_1M[normalized]
-    for prefix, rates in GEMINI_PRICING_PER_1M.items():
-        if normalized.startswith(prefix):
+    for prefix, rates in sorted(GEMINI_PRICING_PER_1M.items(), key=lambda kv: -len(kv[0])):
+        if normalized.startswith(prefix + "-"):
             return rates
     return None
 

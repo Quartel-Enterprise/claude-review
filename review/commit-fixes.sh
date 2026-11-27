@@ -75,7 +75,11 @@ push_args=()
 if [ -n "$push_token" ]; then
   server_url=${GITHUB_SERVER_URL:-https://github.com}
   basic_auth=$(printf 'x-access-token:%s' "$push_token" | base64 | tr -d '\n')
-  push_args=(-c "http.${server_url}/.extraheader=AUTHORIZATION: basic ${basic_auth}")
+  # Reset any pre-existing multi-valued extraheader before setting our Authorization header.
+  push_args=(
+    -c "http.${server_url}/.extraheader="
+    -c "http.${server_url}/.extraheader=AUTHORIZATION: basic ${basic_auth}"
+  )
 fi
 
 error=""
