@@ -148,8 +148,17 @@ resolve_skill_targets() {
 }
 
 cmd_skills() {
-  local action=${1:-status}
-  [ $# -gt 0 ] && shift
+  local action="status"
+  if [ $# -gt 0 ]; then
+    case "$1" in
+      -h | --help)
+        echo "Usage: ai-review skills <install|remove|status> [--agent all|antigravity|claude|codex] [--project <dir>]"
+        return 0
+        ;;
+      -*) ;;
+      *) action=$1; shift ;;
+    esac
+  fi
   local agent="all" project=""
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -176,7 +185,6 @@ cmd_skills() {
             echo "✓ Skill already installed -> $target"
             continue
           fi
-          # Remove existing non-symlink directory/file so ln -sfn never nests a symlink inside it.
           [ ! -L "$target" ] && rm -rf "$target"
         fi
         ln -sfn "$skill_dir" "$target"
@@ -199,8 +207,14 @@ cmd_skills() {
     status | list)
       echo "Skill source: $skill_dir"
       echo "Version: $(cmd_version)"
-      local p
-      for p in "$HOME/.gemini/skills/ai-review" "$HOME/.claude/skills/ai-review" "$HOME/.agents/skills/ai-review"; do
+      local targets p
+      if [ -n "$project" ] || [ "$agent" != all ]; then
+        targets=$(resolve_skill_targets "$agent" "$project") || return $?
+      else
+        targets=$(printf '%s\n' "$HOME/.gemini/skills/ai-review" "$HOME/.claude/skills/ai-review" "$HOME/.agents/skills/ai-review")
+      fi
+      while IFS= read -r p; do
+        [ -n "$p" ] || continue
         if [ -L "$p" ]; then
           echo "  ✓ $p -> $(readlink "$p")"
         elif [ -d "$p" ]; then
@@ -208,7 +222,7 @@ cmd_skills() {
         else
           echo "  - $p (not installed)"
         fi
-      done
+      done <<< "$targets"
       ;;
     *)
       echo "Unknown skills subcommand '$action': use install, remove, or status." >&2
@@ -589,6 +603,13 @@ run_gemini_provider() {
         > "$state/gemini-findings.json"
     fi
   fi
+  local has_findings=false
+  [ -f "$state/gemini-findings.json" ] && has_findings=true
+  if [ -f "$state/gemini.stats.json" ]; then
+    jq -c --argjson rc "$rc" --argjson ok "$has_findings" '. + {exit_code: $rc, has_findings: $ok}' \
+      "$state/gemini.stats.json" > "$state/gemini.stats.json.tmp" &&
+      mv "$state/gemini.stats.json.tmp" "$state/gemini.stats.json"
+  fi
   echo "[gemini] Finished in ${dur}s (exit=$rc)" >&2
   [ "$rc" -eq 0 ] || { tail -n 10 "$err_out" >&2 || true; }
   return "$rc"
@@ -696,6 +717,13 @@ run_claude_provider() {
         > "$state/claude-findings.json"
     fi
   fi
+  local has_findings=false
+  [ -f "$state/claude-findings.json" ] && has_findings=true
+  if [ -f "$state/claude.stats.json" ]; then
+    jq -c --argjson rc "$rc" --argjson ok "$has_findings" '. + {exit_code: $rc, has_findings: $ok}' \
+      "$state/claude.stats.json" > "$state/claude.stats.json.tmp" &&
+      mv "$state/claude.stats.json.tmp" "$state/claude.stats.json"
+  fi
   echo "[claude] Finished in ${dur}s (exit=$rc)" >&2
   [ "$rc" -eq 0 ] || { tail -n 10 "$err_out" >&2 || true; }
   return "$rc"
@@ -720,19 +748,39 @@ wall_seconds=$((wall_end - wall_start))
 any_provider_ok=false
 merge_args=()
 stats_files=()
+warnings=()
 if [ "$run_gemini" = true ]; then
-  [ "$(cat "$state/gemini.rc" 2> /dev/null || echo 1)" -eq 0 ] && any_provider_ok=true
-  [ -f "$state/gemini-findings.json" ] && merge_args+=("gemini:$state/gemini-findings.json")
+  g_rc=$(cat "$state/gemini.rc" 2> /dev/null || echo 1)
+  [ "$g_rc" -eq 0 ] && any_provider_ok=true
+  if [ -f "$state/gemini-findings.json" ]; then
+    merge_args+=("gemini:$state/gemini-findings.json")
+  elif [ "$g_rc" -ne 0 ]; then
+    warnings+=("Gemini failed (exit $g_rc).")
+  else
+    warnings+=("Gemini ended without a findings list.")
+  fi
   [ -f "$state/gemini.stats.json" ] && stats_files+=("$state/gemini.stats.json")
 fi
 if [ "$run_claude" = true ]; then
-  [ "$(cat "$state/claude.rc" 2> /dev/null || echo 1)" -eq 0 ] && any_provider_ok=true
-  [ -f "$state/claude-findings.json" ] && merge_args+=("claude:$state/claude-findings.json")
+  c_rc=$(cat "$state/claude.rc" 2> /dev/null || echo 1)
+  [ "$c_rc" -eq 0 ] && any_provider_ok=true
+  if [ -f "$state/claude-findings.json" ]; then
+    merge_args+=("claude:$state/claude-findings.json")
+  elif [ "$c_rc" -ne 0 ]; then
+    warnings+=("Claude failed (exit $c_rc).")
+  else
+    warnings+=("Claude ended without a findings list.")
+  fi
   [ -f "$state/claude.stats.json" ] && stats_files+=("$state/claude.stats.json")
 fi
 
+provider_warnings=""
+if [ "${#warnings[@]}" -gt 0 ]; then
+  provider_warnings=$(IFS=' '; echo "${warnings[*]}")
+fi
+
 if [ "$any_provider_ok" != true ]; then
-  echo "All enabled review providers failed." >&2
+  echo "All enabled review providers failed.${provider_warnings:+ $provider_warnings}" >&2
   exit 1
 fi
 
@@ -752,11 +800,13 @@ if [ "$post_pr" = true ]; then
     GITHUB_REPOSITORY="$repo_nwo" \
       GITHUB_WORKSPACE="$workspace" \
       PROVIDERS="$providers_csv" \
+      PROVIDER_WARNINGS="$provider_warnings" \
       "$scripts_dir/post-review.sh" "$pr_number" <<< "$merged" >&2
   else
     GITHUB_REPOSITORY="$repo_nwo" \
       GITHUB_WORKSPACE="$workspace" \
       PROVIDERS="$providers_csv" \
+      PROVIDER_WARNINGS="$provider_warnings" \
       "$scripts_dir/post-review.sh" "$pr_number" <<< "$merged"
   fi
 fi
@@ -770,6 +820,7 @@ if [ "$json_output" = true ]; then
 else
   WALL_SECONDS="$wall_seconds" \
     PROVIDER_STATS="$stats_json" \
+    PROVIDER_WARNINGS="$provider_warnings" \
     SHOW_MICRO_COSTS="$show_micro_costs" \
     python3 "$scripts_dir/format-findings.py" <<< "$merged"
 fi

@@ -89,17 +89,29 @@ check_read_path() {
 check_pattern_safe() {
   local raw=$1 field=$2
   [ -n "$raw" ] || return 0
-  case "$raw" in
-    /* | ~*)
-      deny "$tool_name" "$field cannot start with '/' or '~'"
-      ;;
-    .. | ../* | */.. | */../*)
-      deny "$tool_name" "$field cannot traverse parent directories ('..')"
-      ;;
-    .git | .git/* | */.git | */.git/*)
-      deny "$tool_name" "$field cannot target .git"
-      ;;
-  esac
+  local reason
+  if ! reason=$(python3 - "$raw" <<'PY'
+import re, sys
+
+raw = sys.argv[1]
+# Split across brace-expansion delimiters so payloads like `{../*,a}` or `{.git/config,*}`
+# cannot hide disallowed paths inside brace alternatives.
+tokens = [t for t in re.split(r"[{},]+", raw) if t]
+for tok in tokens:
+    if tok.startswith("/") or tok.startswith("~"):
+        print("cannot start with '/' or '~'")
+        sys.exit(1)
+    for part in tok.split("/"):
+        if part == ".." or (part.startswith(".") and ("*" in part or "?" in part or "[" in part or "]" in part)):
+            print("cannot traverse parent directories or wildcard hidden paths")
+            sys.exit(1)
+        if part == ".git":
+            print("cannot target .git")
+            sys.exit(1)
+PY
+  ); then
+    deny "$tool_name" "$field ${reason:-contains an unsafe path pattern}"
+  fi
 }
 
 # Extract every non-empty string value for the listed tool_input keys (fails closed on jq errors).

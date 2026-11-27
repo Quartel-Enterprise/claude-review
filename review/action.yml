@@ -193,14 +193,17 @@ runs:
             error "$1 '$2' isn't a valid effort level."
             return
           fi
-          case "${2,,}" in
+          case "$2" in
             low | medium | high | xhigh | max) ;;
             *) echo "::warning::$1 '$2' is not one of the standard levels (low, medium, high, xhigh, max); passing it through to the provider." ;;
           esac
         }
-        check_effort "effort" "$EFFORT"
-        claude_effort=${CLAUDE_EFFORT:-$EFFORT}
-        gemini_effort=${GEMINI_EFFORT:-$EFFORT}
+        effort_norm=${EFFORT,,}
+        claude_effort=${CLAUDE_EFFORT:-$effort_norm}
+        claude_effort=${claude_effort,,}
+        gemini_effort=${GEMINI_EFFORT:-$effort_norm}
+        gemini_effort=${gemini_effort,,}
+        check_effort "effort" "$effort_norm"
         check_effort "claude-effort" "$claude_effort"
         check_effort "gemini-effort" "$gemini_effort"
 
@@ -286,14 +289,20 @@ runs:
           echo "review=$1" >> "$GITHUB_OUTPUT"
           exit 0
         }
-        # Skip bot-triggered runs unless explicitly allowlisted (consistent across all providers).
+        # Skip bot-triggered runs unless explicitly allowlisted (matches claude-code-action: '*' allows all bots).
         if [[ "$ACTOR" == *"[bot]" ]]; then
           bot_name=${ACTOR%"[bot]"}
+          bot_name=${bot_name,,}
           allowed=false
           IFS=',' read -r -a bots <<< "$ALLOWED_BOTS"
           for b in "${bots[@]}"; do
             b=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<< "$b")
-            [ -n "$b" ] && [ "$b" = "$bot_name" ] && allowed=true
+            b=${b%"[bot]"}
+            b=${b,,}
+            if [ "$b" = "*" ] || { [ -n "$b" ] && [ "$b" = "$bot_name" ]; }; then
+              allowed=true
+              break
+            fi
           done
           if [ "$allowed" != true ]; then
             echo "::notice::Bot actor '$ACTOR' is not listed in allowed-bots, so this run is skipped."
@@ -384,7 +393,8 @@ runs:
               | gsub("\\s*<!-- (?:ai|claude)-review run [^>]*-->"; "")
               | split("\n\n")[1:]
               | reduce .[] as $paragraph ({items: [], fenced: false};
-                  (if (.fenced | not) and ($paragraph | test("^[0-9]+\\. (`|\\(no file\\))")) then .items += [$paragraph]
+                  (if (.fenced | not) and ($paragraph | test("^> ⚠️")) then .
+                    elif (.fenced | not) and ($paragraph | test("^[0-9]+\\. (`|\\(no file\\))")) then .items += [$paragraph]
                     elif (.items | length) > 0 then .items[-1] += " " + $paragraph else . end)
                   | .fenced = (.fenced != ([$paragraph | scan("(?m)^\\s*```")] | length % 2 == 1)))
               | .items[] | "- " + (gsub("\\s+"; " ") | .[0:300])' \
@@ -653,6 +663,8 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.github-token || github.token }}
         FIX_PUSH_TOKEN: ${{ inputs.github-token || github.token }}
+        HAS_GITHUB_TOKEN: ${{ inputs.github-token != '' }}
+        CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -734,7 +746,24 @@ runs:
           exit 0
         fi
 
-        if [ "$FIX" = true ] && [ ! -f "$STATE/.pushed" ]; then
+        # Only push fixes from the fallback step when Claude didn't own the App OIDC token
+        # (i.e. Gemini-only runs or runs with an explicit custom github-token). Otherwise a
+        # GITHUB_TOKEN push would skip downstream check workflows on the fix commit.
+        if [ "$FIX" = true ] && [ ! -f "$STATE/.pushed" ] && { [ "$RUN_CLAUDE" != true ] || [ "$HAS_GITHUB_TOKEN" = true ]; }; then
+          # If Claude ran and failed or left no findings list, revert any unconfirmed Claude edits
+          # and restore only Gemini's confirmed patch (if any) before committing.
+          if [ "$RUN_CLAUDE" = true ] && { [ "$CLAUDE_OUTCOME" != success ] || [ ! -f "$STATE/claude-findings.json" ]; }; then
+            if [ -n "$(git diff --diff-filter=M --name-only 2> /dev/null)" ]; then
+              git -c core.hooksPath=/dev/null -c core.fsmonitor=false \
+                diff --diff-filter=M --name-only -z |
+                git -c core.hooksPath=/dev/null -c core.fsmonitor=false \
+                  checkout --pathspec-from-file=- --pathspec-file-nul 2> /dev/null || true
+            fi
+            if [ -s "$STATE/gemini-fixes.patch" ]; then
+              git -c core.hooksPath=/dev/null -c core.fsmonitor=false \
+                apply "$STATE/gemini-fixes.patch" 2> /dev/null || true
+            fi
+          fi
           if sha=$("$TOOLS/commit-fixes.sh" <<< "$findings" 2> "$STATE/.commit-log"); then
             echo "$sha" > "$STATE/.pushed"
             echo "Pushed the fixes as $sha"

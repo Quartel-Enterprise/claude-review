@@ -59,7 +59,8 @@ echo "Running Gemini review with model=$model (thinkingLevel=$thinking_level, ef
 cli_prefix="$RUNNER_TEMP/ai-review-gemini-cli"
 gemini_bin="$cli_prefix/node_modules/.bin/gemini"
 if [ ! -x "$gemini_bin" ]; then
-  if ! npm install --no-audit --no-fund --silent --prefix "$cli_prefix" "@google/gemini-cli@${cli_version}" > /dev/null 2> "$state/.gemini-install.log"; then
+  # Scrub API and GitHub tokens from npm install so lifecycle scripts cannot access them.
+  if ! env -u GEMINI_API_KEY -u GH_TOKEN npm install --no-audit --no-fund --silent --prefix "$cli_prefix" "@google/gemini-cli@${cli_version}" > /dev/null 2> "$state/.gemini-install.log"; then
     echo "::warning::Failed to install @google/gemini-cli@${cli_version}."
     jq -cn --arg model "$model" --arg effort "$effort" --arg thinking "$thinking_level" \
       '{provider: "gemini", model: $model, effort: $effort, thinking_level: $thinking, duration_seconds: 0, status: "install_failed"}' \
@@ -123,11 +124,18 @@ TOML
   fi
 } > "$policy_file"
 
+# Gemini 2.x models use thinkingBudget rather than thinkingLevel (passing thinkingLevel returns HTTP 400).
+use_thinking_level=true
+case "${model,,}" in
+  gemini-2.* | */gemini-2.*) use_thinking_level=false ;;
+esac
+
 # Shell-quote every argument so paths containing spaces or special characters cannot shift $1..$4.
 guard_cmd=$(printf '%q %q %q %q %q' "$dir/gemini-guard.sh" "$state" "$workspace" "$reviewed" "$fix")
 jq -n \
   --arg model "$model" \
   --arg thinking "$thinking_level" \
+  --argjson use_tl "$use_thinking_level" \
   --arg policy "$policy_file" \
   --arg guard "$guard_cmd" \
   '{
@@ -139,20 +147,6 @@ jq -n \
       }
     },
     adminPolicyPaths: [$policy],
-    modelConfigs: {
-      customOverrides: [
-        {
-          match: { model: $model },
-          modelConfig: {
-            generateContentConfig: {
-              thinkingConfig: {
-                thinkingLevel: $thinking
-              }
-            }
-          }
-        }
-      ]
-    },
     hooks: {
       BeforeTool: [
         {
@@ -167,7 +161,22 @@ jq -n \
         }
       ]
     }
-  }' > "$settings_file"
+  } + (if $use_tl then {
+    modelConfigs: {
+      customOverrides: [
+        {
+          match: { model: $model },
+          modelConfig: {
+            generateContentConfig: {
+              thinkingConfig: {
+                thinkingLevel: $thinking
+              }
+            }
+          }
+        }
+      ]
+    }
+  } else {} end)' > "$settings_file"
 
 chmod -R a-w "$cfg_dir"
 
@@ -304,6 +313,10 @@ if [ "$fix" = true ]; then
         git -C "$workspace" -c core.hooksPath=/dev/null -c core.fsmonitor=false \
           checkout --pathspec-from-file=- --pathspec-file-nul 2> /dev/null || true
     fi
+  else
+    # Snapshot Gemini's confirmed edits so multi-provider fallback can restore them if Claude fails mid-edit.
+    git -C "$workspace" -c core.hooksPath=/dev/null -c core.fsmonitor=false \
+      diff --binary > "$state/gemini-fixes.patch" 2> /dev/null || rm -f "$state/gemini-fixes.patch"
   fi
 fi
 

@@ -145,7 +145,11 @@ def main():
             "duration": int(entry.get("duration_seconds") or 0),
             "cost": cost,
             "tokens": tok_desc,
+            "exit_code": int(entry.get("exit_code") or 0),
+            "has_findings": entry.get("has_findings", True),
         })
+
+    provider_warnings = os.environ.get("PROVIDER_WARNINGS", "").strip()
 
     sum_s = sum(e["duration"] for e in enriched)
     known_costs = [e["cost"] for e in enriched if e["cost"] is not None]
@@ -202,11 +206,18 @@ def main():
         for e in enriched:
             label = PROV_NAMES.get(e["provider"], e["provider"].title())
             sub_tag = " [subscription]" if e["subscription"] else ""
+            status_tag = ""
+            if e["exit_code"] != 0:
+                status_tag = f" [FAILED exit={e['exit_code']}]"
+            elif e["has_findings"] is False:
+                status_tag = " [no findings list]"
             tok_part = f" ({e['tokens']})" if e["tokens"] else ""
             print(
-                f"  - {label} (`{e['model']}` via {e['engine']}{sub_tag}): "
+                f"  - {label} (`{e['model']}` via {e['engine']}{sub_tag}){status_tag}: "
                 f"{fmt_duration(e['duration'])} · {fmt_usd(e['cost'])}{tok_part}"
             )
+    if provider_warnings:
+        print(f"Warning: {provider_warnings}")
 
     if not findings:
         return
