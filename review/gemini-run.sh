@@ -12,6 +12,9 @@
 #   (while multi-provider runs use continue-on-error in review/action.yml).
 set -uo pipefail
 
+# Gemini never uses GitHub Actions OIDC; drop OIDC minting credentials before npm install and CLI launch.
+unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
+
 dir=$(cd "$(dirname "$0")" && pwd)
 state=${STATE:?STATE is not set}
 workspace=${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is not set}

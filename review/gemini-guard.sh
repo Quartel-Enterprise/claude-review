@@ -91,20 +91,63 @@ check_pattern_safe() {
   [ -n "$raw" ] || return 0
   local reason
   if ! reason=$(python3 - "$raw" <<'PY'
-import fnmatch, re, sys
+import fnmatch, sys
 
 raw = sys.argv[1]
 if "\\" in raw:
     print("cannot contain backslashes")
     sys.exit(1)
-# Split across brace-expansion delimiters so payloads like `{../*,a}` or `{.git/config,*}`
-# cannot hide disallowed paths inside brace alternatives.
-tokens = [t for t in re.split(r"[{},]+", raw) if t]
-for tok in tokens:
-    if tok.startswith("/") or tok.startswith("~"):
+
+
+def expand_braces(s, max_items=64):
+    """Iteratively expand comma-separated brace groups with a strict cap."""
+    results = [s]
+    while True:
+        next_results = []
+        expanded_any = False
+        for item in results:
+            # Find the innermost '{...}' group.
+            start = -1
+            end = -1
+            for i, ch in enumerate(item):
+                if ch == "{":
+                    start = i
+                elif ch == "}":
+                    if start == -1:
+                        print("contains unbalanced braces")
+                        sys.exit(1)
+                    end = i
+                    break
+            if start == -1:
+                next_results.append(item)
+                continue
+            if end == -1:
+                print("contains unbalanced braces")
+                sys.exit(1)
+            body = item[start + 1 : end]
+            # Reject range expansions like {a..z} or {1..5}; allow comma lists only.
+            if ".." in body or "," not in body:
+                print("contains unsupported brace expression")
+                sys.exit(1)
+            prefix, suffix = item[:start], item[end + 1 :]
+            alts = body.split(",")
+            for alt in alts:
+                next_results.append(prefix + alt + suffix)
+                if len(next_results) > max_items:
+                    print("exceeds brace expansion limit")
+                    sys.exit(1)
+            expanded_any = True
+        results = next_results
+        if not expanded_any:
+            break
+    return results
+
+
+for candidate in expand_braces(raw):
+    if candidate.startswith("/") or candidate.startswith("~"):
         print("cannot start with '/' or '~'")
         sys.exit(1)
-    for part in tok.split("/"):
+    for part in candidate.split("/"):
         if not part:
             continue
         if part == ".." or part == ".git":
@@ -112,10 +155,7 @@ for tok in tokens:
             sys.exit(1)
         if part in ("*", "**"):
             continue
-        if (part.startswith(".") and any(c in part for c in "*?[]")) or fnmatch.fnmatchcase(part, ".git") or fnmatch.fnmatchcase(part, ".."):
-            print("cannot match .git or parent directories via wildcards")
-            sys.exit(1)
-        if fnmatch.fnmatchcase(".git", part) or fnmatch.fnmatchcase("..", part):
+        if (part.startswith(".") and any(c in part for c in "*?[]")) or fnmatch.fnmatchcase(".git", part) or fnmatch.fnmatchcase("..", part):
             print("cannot match .git or parent directories via wildcards")
             sys.exit(1)
 PY

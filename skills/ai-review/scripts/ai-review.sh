@@ -200,13 +200,25 @@ cmd_skills() {
       done <<< "$targets"
       ;;
     remove | uninstall)
-      local targets target
+      local targets target target_real
       targets=$(resolve_skill_targets "$agent" "$project") || return $?
       while IFS= read -r target; do
         [ -n "$target" ] || continue
-        if [ -L "$target" ] || [ -e "$target" ]; then
-          rm -rf "$target"
-          echo "✓ Removed skill <- $target"
+        if [ -L "$target" ]; then
+          target_real=$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$target")
+          if [ "$target_real" = "$skill_dir" ] || [ "$force" = true ]; then
+            rm -f "$target"
+            echo "✓ Removed skill <- $target"
+          else
+            echo "! Skipping symlink pointing elsewhere at $target -> $(readlink "$target") (pass --force to remove)" >&2
+          fi
+        elif [ -e "$target" ]; then
+          if [ "$force" = true ]; then
+            rm -rf "$target"
+            echo "✓ Removed skill <- $target"
+          else
+            echo "! Skipping non-symlink directory/file at $target (pass --force to remove)" >&2
+          fi
         else
           echo "- Not installed: $target"
         fi
@@ -459,8 +471,12 @@ if [ ! -s "$diff_file" ]; then
 fi
 
 build_prompt() {
-  local out_file=$1 eff=$2 max_bytes=${3:-120000}
-  python3 - "$out_file" "$diff_file" "$target_desc" "$eff" "$max_findings" "$fix" "$extra_instructions" "$max_bytes" <<'PY'
+  local out_file=$1 eff=$2 max_bytes=${3:-120000} extra_note=${4:-}
+  local combined_extra="$extra_instructions"
+  if [ -n "$extra_note" ]; then
+    combined_extra="${combined_extra:+${combined_extra}$'\n\n'}${extra_note}"
+  fi
+  python3 - "$out_file" "$diff_file" "$target_desc" "$eff" "$max_findings" "$fix" "$combined_extra" "$max_bytes" <<'PY'
 import pathlib, sys
 
 out_path, diff_path, target_desc, effort, max_findings, fix_str, extra, max_bytes_s = sys.argv[1:9]
@@ -629,11 +645,16 @@ run_claude_provider() {
   local err_out="$state/claude-err.log"
   local json_out="$state/claude-out.json"
 
+  local claude_coord_note=""
+  if [ "$run_gemini" = true ] && [ "$fix" = true ]; then
+    claude_coord_note="Note: Gemini already ran with --fix and may have applied fixes to the working tree. Do not revert Gemini's fixes or report them as author bugs."
+  fi
+
   local start_ts end_ts dur rc=0 resolved_model="" is_sub=true
   start_ts=$(date +%s)
   if [ "$claude_engine" = claude ]; then
     command -v claude > /dev/null 2>&1 || { echo "claude CLI not found in PATH (install Claude Code or use --claude-engine agy)." >&2; echo 1 > "$state/claude.rc"; return 1; }
-    build_prompt "$prompt_file" "$claude_effort" 200000
+    build_prompt "$prompt_file" "$claude_effort" 200000 "$claude_coord_note"
     resolved_model=$claude_model
     [ -n "${ANTHROPIC_API_KEY:-}" ] && is_sub=false
     local tools_arg
@@ -664,7 +685,7 @@ run_claude_provider() {
     fi
   elif [ "$claude_engine" = agy ]; then
     command -v agy > /dev/null 2>&1 || { echo "agy CLI not found in PATH." >&2; echo 1 > "$state/claude.rc"; return 1; }
-    build_prompt "$prompt_file" "$claude_effort" 65536
+    build_prompt "$prompt_file" "$claude_effort" 65536 "$claude_coord_note"
     local -a mode_args=()
     resolved_model=$(resolve_agy_claude_model "$claude_model" "$claude_effort")
     [ "$fix" = true ] && mode_args=(--mode accept-edits)
@@ -825,10 +846,12 @@ if [ "$post_pr" = true ]; then
 fi
 
 if [ "$json_output" = true ]; then
+  [ -n "$provider_warnings" ] && echo "Warning: $provider_warnings" >&2
   if [ -n "$merged" ]; then
     echo "$merged"
   else
-    echo "[]"
+    echo "No provider returned a valid findings list." >&2
+    exit 1
   fi
 else
   WALL_SECONDS="$wall_seconds" \
