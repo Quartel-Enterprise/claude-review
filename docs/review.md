@@ -1,52 +1,86 @@
 # The review
 
 The workflow that runs the review is in the [README's setup](../README.md#setup). This page covers
-its inputs and what the review does with a pull request.
+its inputs, outputs, multi-provider modes, and what the review does with a pull request.
 
 ## Inputs
 
 The action reads the pull request from the `pull_request` event, so call it from a workflow that
-runs on `pull_request` (any of its types). Drop `fix: 'true'` for a review that only comments.
+runs on `pull_request`. Drop `fix: 'true'` for a review that only comments.
 
-| Input | Default | |
+| Input | Default | Description |
 | --- | --- | --- |
-| `oauth-token`, `anthropic-api-key` | | A Claude Code OAuth token or an Anthropic API key. Set exactly one, or the run fails |
-| `model` | `opus` | An alias (`opus`, `sonnet`, `haiku`) or a full model id |
-| `effort` | `high` | The `/code-review` skill's level: `low`, `medium`, `high`, `xhigh` or `max`. Higher levels find more, some of it less certain, and cost more |
-| `max-findings` | `all` | `all` or a number: the review keeps the most severe ones |
-| `fix` | `'false'` | `'true'` to apply the findings and push them as a commit to the pull request's branch |
-| `cost` | `'true'` | `'true'` to comment what the run cost on the pull request, `'false'` to leave it out. See [What a run costs](cost.md) |
-| `instructions` | | Extra instructions appended to the prompt, e.g. for a review on request |
-| `allowed-bots` | | Bots whose pull requests are reviewed too, as comma-separated logins without `[bot]` (e.g. `renovate`). A run a bot started fails otherwise, since claude-code-action refuses it |
-| `github-token`, `bot-login`, `bot-id` | none, `claude[bot]`, `209825114` | Review as your own GitHub App: see [below](#your-own-github-app) |
-| `memory-repository`, `memory-ssh-key`, `memory-files` | none | Private review conventions: see [below](#private-conventions) |
+| `providers` | **required** | Comma-separated list of providers to run: `claude`, `gemini` (or alias `antigravity`), or `claude,gemini` |
+| `claude-oauth-token`, `anthropic-api-key` | | Claude Code OAuth token or Anthropic API key. Set exactly one when `claude` is enabled |
+| `gemini-api-key` | | Google AI Studio Gemini API key. Required when `gemini` is enabled |
+| `claude-model` | `opus` *(when `claude` enabled)* | Alias (`opus`, `sonnet`, `haiku`) or full model id |
+| `gemini-model` | `gemini-4-neon` *(when `gemini` enabled)* | Alias (`carbon`, `neon`, `argon`, `hydrogen`) or full model id |
+| `effort` | `'high'` | Shared default effort for all providers: `low`, `medium`, `high`, `xhigh` or `max` |
+| `claude-effort` | inherits `effort` | Optional effort override for Claude |
+| `gemini-effort` | inherits `effort` | Optional effort override for Gemini (maps to `thinkingLevel` up to each model's ceiling) |
+| `gemini-cli-version` | `'0.71.1'` | Pinned `@google/gemini-cli` npm version |
+| `max-findings` | `'all'` | `'all'` or a positive number: each provider keeps at most that many findings, most severe first |
+| `fix` | `'false'` | `'true'` to apply clear, contained findings and push them as one commit to the pull request's branch |
+| `cost` | `'true'` | `'true'` to comment what the run cost and how long each provider took. See [What a run costs and takes](cost.md) |
+| `show-micro-costs` | `'false'` | `'true'` to include auxiliary models under \$0.01 (such as Haiku background calls) in the cost table and total |
+| `instructions` | `''` | Extra instructions appended to the review prompt |
+| `allowed-bots` | `''` | Bots whose pull requests are reviewed too, as comma-separated logins without `[bot]` (e.g. `renovate`) |
+| `github-token`, `bot-login`, `bot-id` | none | Review as your own GitHub App. When `github-token` is set, `bot-login` and `bot-id` are **required**. Without it, defaults to `claude[bot]` (`209825114`) when `claude` is enabled, or `github-actions[bot]` (`41898282`) for Gemini-only runs |
+| `memory-repository`, `memory-ssh-key`, `memory-files` | none | Private review conventions. When `memory-repository` is set, both `memory-ssh-key` and `memory-files` are **required** |
 
-The action has no outputs. The workflow that calls it stays in your repository; the action itself
-comes from the pinned release, never from the pull request.
+## Outputs
 
-The review fails only when the run itself does (an expired token, the timeout), never because of
-what it found. A finding on a line outside the diff is anchored to the nearest changed line of its
-file; one in a file the diff doesn't touch goes in the review's body. The review can't read earlier
-reviews, so the action hands it the findings they left, for it not to raise them again.
+| Output | Description |
+| --- | --- |
+| `total-duration-seconds` | Sum of execution times across all enabled providers, in seconds |
+| `provider-durations` | JSON object mapping each provider name to its execution duration in seconds (e.g. `{"gemini":95,"claude":140}`) |
+| `total-cost-usd` | Total reported/estimated cost in USD (after applying `show-micro-costs`) |
+
+## Gemini models and thinking levels
+
+| Alias | Resolved model ID | Positioning | Supported `thinkingLevel` |
+| --- | --- | --- | --- |
+| `neon` *(default)* | `gemini-4-neon` | Balanced frontier engineering & debugging | `LOW`, `MEDIUM`, `HIGH`, `XHIGH` |
+| `carbon` | `gemini-4-carbon` | Maximum deep reasoning & architecture | `LOW`, `MEDIUM`, `HIGH` |
+| `argon` | `gemini-4-argon` | Efficient frontier reasoning | `LOW`, `MEDIUM`, `HIGH` |
+| `hydrogen` | `gemini-4-hydrogen` | Fast, economical daily driver | `LOW`, `MEDIUM`, `HIGH`, `XHIGH` |
+
+Passing `effort: max` maps to `XHIGH` on `gemini-4-neon` and `gemini-4-hydrogen`, and caps cleanly
+at `HIGH` on `gemini-4-carbon` and `gemini-4-argon`.
+
+## Running multiple providers
+
+You have two ways to run both Claude and Gemini on the same pull request:
+
+1. **Consolidated in one job (`providers: claude,gemini`):** Gemini runs first, then Claude runs
+   second, and all findings are merged into **one pull request review** (with `**Claude**` /
+   `**Gemini**` badges on every comment and per-provider counts in the summary) and **one cost &
+   timing comment** showing individual and total durations. Compatible with `fix: 'true'`.
+2. **Parallel in two jobs (matrix):** run one job with `providers: claude` and another with
+   `providers: gemini` (with `fix: 'false'`). Wall-clock time drops to the slower of the two, and
+   each job tags its own review and cost comment with its provider name so they never collide.
 
 ## Fixes
 
-With `fix`, the model may edit the files of the checkout, never under `.git`, `.github`, `.claude`
-or `.agent-memory`, and can't create a file. It fixes only what is clear and contained. Before
-posting, the session's Stop hook runs `commit-fixes.sh`, which commits the tracked files the review
-changed as the bot user and pushes them with the App's token. Nothing is pushed when no finding is
-marked fixed, when a fix touches `.github` or `.claude`, when the working tree has an untracked file,
-or when the branch moved during the review: the push is never forced. The fixed findings are then
-listed in the review's body, under the fix commit, and open no thread. The fix commit isn't built
-before the push, so a fix that breaks the build shows up in its checks.
+With `fix: 'true'`, the model may edit existing tracked files of the checkout — never under `.git`,
+`.github`, `.claude`, `.gemini` or `.agent-memory` — and can't create files. Before posting,
+`commit-fixes.sh` commits the changed tracked files as `bot-login` and pushes them without forcing.
+Nothing is pushed when no finding is marked fixed, when a fix touches `.github`, `.claude` or
+`.gemini`, when the working tree has an untracked file, when a fix adds a token-shaped string, or
+when the branch moved during the review.
 
-A cheaper review, for a repository that wants a quick look rather than a thorough one:
+For Gemini-only runs with `fix: 'true'`, provide a GitHub App token via `github-token` (along with
+`bot-login` and `bot-id`) if you also use `gate`: pushes made with the default `GITHUB_TOKEN` do
+not trigger pull request check workflows.
+
+A cheaper, fast Gemini review:
 
 ```yaml
-      - uses: Quartel-Enterprise/claude-review/review@1.5.0
+      - uses: Quartel-Enterprise/ai-review/review@2.0.0
         with:
-          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
-          model: sonnet
+          providers: gemini
+          gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
+          gemini-model: hydrogen
           effort: medium
           max-findings: '10'
 ```
@@ -54,29 +88,22 @@ A cheaper review, for a repository that wants a quick look rather than a thoroug
 ## Reviewing again
 
 The review runs when the pull request opens or a draft is marked ready. A reopened pull request isn't
-reviewed, and neither is a later push, the fix commit included. A draft marked ready a second time is reviewed
-again. To review again on demand, add a workflow of your own, for example one on
-`pull_request: types: [labeled]` that runs the same steps when a given label is added, passing
-`instructions` to say why. Without the review's `fix`, it only comments.
+reviewed, and neither is a later push, the fix commit included. A draft marked ready a second time is
+reviewed again. To review again on demand, add a workflow on `pull_request: types: [labeled]` and
+pass `instructions` to explain why.
 
 ## Pull requests opened with a conflict
 
-GitHub starts no `pull_request` workflow while a pull request conflicts with its base, so one opened,
-or marked ready, with a conflict gets no review on that event. With `synchronize` among the
-workflow's types, as above, the push that solves the conflict brings it: on a `synchronize` event,
-the action reviews only when the calling workflow has no run between the pull request's opening (or,
-for a draft, its last marking as ready) and this one, and never on a push by `bot-login`, its own fix
-commit. Runs a draft left before it was marked ready don't count. Every other push ends in a few seconds, green, without reviewing. The job needs
-`actions: read` for that; without it, or when GitHub's API fails, the push isn't reviewed.
-
-The gate doesn't wait for that review, since the push is the author's: the checks run on it right
-away, and again on the review's fix commit, if any.
+GitHub starts no `pull_request` workflow while a pull request conflicts with its base, so one opened
+or marked ready with a conflict gets no review on that event. With `synchronize` among the workflow's
+types, the push that solves the conflict brings it: on a `synchronize` event, the action reviews only
+when the calling workflow has no earlier run since the pull request opened (or was last marked ready),
+and never on a push by `bot-login`.
 
 ## Your own GitHub App
 
-Without `github-token`, the review exchanges the workflow's OIDC token for one of the Claude GitHub
-App. To post and push as an App of your own, mint its installation token in an earlier step and
-name its bot user:
+To post and push as a GitHub App of your own, mint its installation token in an earlier step and
+pass `github-token`, `bot-login`, and `bot-id` (both are required whenever `github-token` is set):
 
 ```yaml
       - id: app
@@ -84,33 +111,22 @@ name its bot user:
         with:
           client-id: ${{ vars.REVIEW_APP_CLIENT_ID }}
           private-key: ${{ secrets.REVIEW_APP_PRIVATE_KEY }}
-      - uses: Quartel-Enterprise/claude-review/review@1.5.0
+      - uses: Quartel-Enterprise/ai-review/review@2.0.0
         with:
-          oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          providers: gemini
+          gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
           github-token: ${{ steps.app.outputs.token }}
           bot-login: my-review-app[bot]
           bot-id: '123456789' # gh api 'users/my-review-app[bot]' --jq .id
+          fix: 'true'
 ```
 
-The App needs read and write access to contents and pull requests. `bot-id` goes in the fix
-commit's author email, which is how GitHub links the commit to the bot. Pass the same `bot-login`
-to `gate` and `threads`, and use it in the check workflows' `sender.login` condition (see [The gate](gate.md)).
+The App needs read and write access to contents and pull requests. Pass the same `bot-login` to
+`gate` and `threads`.
 
 ## Private conventions
 
-The review follows the repository's `CLAUDE.md`. When the reviewed repository is public and some of
-its review conventions live in a private repository instead, the action can read them from there:
-
-- `memory-repository`: the private repository, as `owner/name`.
-- `memory-ssh-key`: the private half of a read-only
-  [deploy key](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/managing-deploy-keys#deploy-keys)
-  of it, stored as a secret of the reviewed repository.
-- `memory-files`: the files to read, as a sparse-checkout pattern such as `conventions/*.md`. It
-  has no default: without it the review runs without them and warns, so a forgotten input never
-  sends the whole repository to the runner.
-
-The files are checked out into `.agent-memory`, read with the same weight as `CLAUDE.md`, and the
-review is told never to quote one or name its path in a comment. It may still paraphrase them in
-public comments, so pick a pattern that leaves out any file with figures or ids that must stay
-private. Without the key, or when the checkout fails, the review runs without them and the run shows
-a warning.
+The review follows `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` in the checkout. When private
+conventions live in another repository, set all three of `memory-repository`, `memory-ssh-key`, and
+`memory-files` (sparse-checkout pattern such as `conventions/*.md`). The files are checked out into
+`.agent-memory` and the review is instructed never to quote them or name their paths in comments.

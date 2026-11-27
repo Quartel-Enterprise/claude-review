@@ -5,8 +5,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-shellcheck review/*.sh threads/*.sh scripts/*.sh
-python3 -m py_compile review/extract-findings.py
+shellcheck review/*.sh threads/*.sh scripts/*.sh local/*.sh
+python3 -m py_compile review/*.py local/*.py
 
 blocks=$(mktemp -d)
 trap 'rm -rf "$blocks"' EXIT

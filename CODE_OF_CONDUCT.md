@@ -52,7 +52,7 @@ appointed representative at an online or offline event.
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the community
 leaders responsible for enforcement by opening a private report with
-[GitHub's private vulnerability reporting](https://github.com/Quartel-Enterprise/claude-review/security/advisories/new),
+[GitHub's private vulnerability reporting](https://github.com/Quartel-Enterprise/ai-review/security/advisories/new),
 titled "Conduct report" (only the maintainers can read it), or with GitHub's **Report content** on the
 comment itself. All complaints will be reviewed and investigated promptly and fairly.
 

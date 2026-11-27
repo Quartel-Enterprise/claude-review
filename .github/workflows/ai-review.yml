@@ -1,4 +1,4 @@
-name: claude-review
+name: ai-review
 on:
   pull_request:
     types:
@@ -35,14 +35,16 @@ jobs:
       id-token: write
     steps:
       # The head commit, not GitHub's merge of it with main: the review's line numbers have to match
-      # the commit the comments are anchored to. No persisted credentials: checkout keeps
-      # GITHUB_TOKEN's header in a file of its own, which claude-code-action doesn't find when it
-      # swaps in the App's token, so the fix push would be refused.
+      # the commit the comments are anchored to.
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: Quartel-Enterprise/claude-review/review@1.5.0
+      - uses: Quartel-Enterprise/ai-review/review@2.0.0
         with:
-          oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          providers: claude
+          claude-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # To also run Gemini on the same pull request:
+          # providers: claude,gemini
+          # gemini-api-key: ${{ secrets.GEMINI_API_KEY }}

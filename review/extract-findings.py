@@ -1,4 +1,4 @@
-"""Prints the findings array of a Claude review reply, or nothing when the reply has none.
+"""Prints the findings array of an AI review reply, or nothing when the reply has none.
 
 The reply ends with the findings in a ```json fence: the last such fence is read, whatever its case,
 with or without a closing fence (a reply cut short), or with the fence on the same line as the
