@@ -87,7 +87,7 @@ ai-review --provider antigravity --pr 42 --post
 | `ai-review skills install\|remove\|status` | detected agents | Links, removes, or inspects `/ai-review` skill links (`--agent all\|antigravity\|claude\|codex`, `--project <dir>`) |
 | `ai-review version` | | Prints the installed version |
 | `-p`, `--provider` | `gemini` | `gemini`, `antigravity` (alias for `gemini`), `claude`, or comma-separated (`claude,antigravity`) |
-| `-m`, `--model` | provider default | Shorthand model alias/id when running a single provider |
+| `-m`, `--model` | provider default | Shorthand model alias/id for the single selected provider, or for Gemini when both run (use `--gemini-model` / `--claude-model` for multi-provider runs) |
 | `--gemini-model` | `neon` (`gemini-4-neon`) | `neon`, `carbon`, `argon`, `hydrogen`, or full model id |
 | `--claude-model` | `opus` | `opus`, `sonnet`, `haiku`, or full model id |
 | `-e`, `--effort` | `high` | `low`, `medium`, `high`, `xhigh`, or `max` |

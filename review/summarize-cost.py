@@ -342,8 +342,9 @@ def parse_gemini(exec_path, meta, wanted_model, effort, fixed, show_micro_costs)
             r["used_for"] = base_purpose
         filtered_rows.append(r)
 
+    has_unpriced_main = any(r["is_main"] and r["cost"] is None for r in filtered_rows)
     known_costs = [r["cost"] for r in filtered_rows if r["cost"] is not None]
-    reported_cost = sum(known_costs) if known_costs else None
+    reported_cost = sum(known_costs) if (known_costs and not has_unpriced_main) else None
 
     return {
         "provider": "gemini",
@@ -447,6 +448,8 @@ def main():
         notes.append(
             "Claude uses a subscription token, so its tokens are not billed per token and show the API equivalent"
         )
+    if any(r["cost"] is None for r in all_rows):
+        notes.append("Total excludes models with unknown pricing")
     if run_url:
         notes.append(f"[The run]({run_url})")
 
