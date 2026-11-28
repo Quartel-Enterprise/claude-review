@@ -32,8 +32,8 @@ npx skills add Quartel-Enterprise/ai-review
 ```
 
 ```bash
-# Review your current branch against main (read-only, never posts to GitHub)
-ai-review
+# Review your current branch with Gemini, falling back to Claude on quota/errors
+ai-review --provider antigravity --fallback claude
 
 # Review only staged changes before committing
 ai-review --staged

@@ -29,6 +29,8 @@ Usage:
 Review options:
   -p, --provider <list>        Providers: gemini, antigravity (alias for gemini), claude,
                                or comma-separated (e.g. claude,antigravity). Default: gemini
+      --fallback <provider>    Fallback provider (claude, gemini, or antigravity) if the primary
+                               provider fails or returns no findings list
   -m, --model <model>          Model alias/id for the selected single provider (or Gemini when both)
       --gemini-model <model>   Gemini model: neon (default), carbon, argon, hydrogen, or full id
       --claude-model <model>   Claude model: opus (default), sonnet, haiku, or full id
@@ -270,6 +272,7 @@ case "${1:-}" in
 esac
 
 providers_raw="gemini"
+fallback_raw=""
 single_model=""
 gemini_model=""
 claude_model=""
@@ -291,6 +294,7 @@ json_output=false
 while [ $# -gt 0 ]; do
   case "$1" in
     -p | --provider | --providers) providers_raw=${2:?missing value for $1}; shift 2 ;;
+    --fallback) fallback_raw=${2:?missing value for $1}; shift 2 ;;
     -m | --model) single_model=${2:?missing value for $1}; shift 2 ;;
     --gemini-model) gemini_model=${2:?missing value for $1}; shift 2 ;;
     --claude-model) claude_model=${2:?missing value for $1}; shift 2 ;;
@@ -345,6 +349,25 @@ if [ "${#canonical[@]}" -eq 0 ]; then
   echo "At least one provider must be specified." >&2
   exit 2
 fi
+
+fallback_provider=""
+if [ -n "$fallback_raw" ]; then
+  fb=$(lower "$fallback_raw" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  case "$fb" in
+    claude) fallback_provider="claude" ;;
+    gemini | antigravity) fallback_provider="gemini" ;;
+    *)
+      echo "Unknown fallback provider '$fb': use claude, gemini, or antigravity." >&2
+      exit 2
+      ;;
+  esac
+  if { [ "$fallback_provider" = claude ] && [ "$run_claude" = true ]; } ||
+     { [ "$fallback_provider" = gemini ] && [ "$run_gemini" = true ]; }; then
+    echo "--fallback '$fallback_provider' is already enabled in --provider." >&2
+    exit 2
+  fi
+fi
+
 providers_csv=$(IFS=','; echo "${canonical[*]}")
 
 if [ -n "$single_model" ]; then
@@ -791,6 +814,30 @@ else
   [ "$run_gemini" = true ] && { run_gemini_provider || true; }
   [ "$run_claude" = true ] && { run_claude_provider || true; }
 fi
+
+if [ -n "$fallback_provider" ]; then
+  primary_ok=false
+  if [ "$run_gemini" = true ] && [ "$(cat "$state/gemini.rc" 2> /dev/null || echo 1)" -eq 0 ] && [ -f "$state/gemini-findings.json" ]; then
+    primary_ok=true
+  fi
+  if [ "$run_claude" = true ] && [ "$(cat "$state/claude.rc" 2> /dev/null || echo 1)" -eq 0 ] && [ -f "$state/claude-findings.json" ]; then
+    primary_ok=true
+  fi
+  if [ "$primary_ok" != true ]; then
+    echo "[fallback] Primary provider failed or returned no findings; falling back to $fallback_provider..." >&2
+    if [ "$fallback_provider" = claude ]; then
+      run_claude=true
+      canonical+=(claude)
+      run_claude_provider || true
+    elif [ "$fallback_provider" = gemini ]; then
+      run_gemini=true
+      canonical+=(gemini)
+      run_gemini_provider || true
+    fi
+    providers_csv=$(IFS=','; echo "${canonical[*]}")
+  fi
+fi
+
 wall_end=$(date +%s)
 wall_seconds=$((wall_end - wall_start))
 [ "$wall_seconds" -ge 0 ] || wall_seconds=0

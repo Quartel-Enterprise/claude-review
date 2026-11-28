@@ -24,9 +24,10 @@ directory — no repository clone is required.
 ## Common Workflows
 
 ### 1. Hybrid setup (zero pay-as-you-go cost)
-- **Locally (before pushing / opening a PR):** review with Gemini via Antigravity subscription:
+- **Locally (before pushing / opening a PR):** review with Gemini via Antigravity subscription,
+  optionally falling back to Claude on quota/errors:
   ```bash
-  ai-review --provider antigravity --effort high
+  ai-review --provider antigravity --fallback claude --effort high
   ```
 - **In CI (GitHub Actions):** run `providers: claude` with `CLAUDE_CODE_OAUTH_TOKEN`.
 
@@ -58,6 +59,7 @@ ai-review --provider antigravity --pr 42 --post
 ## Options
 
 - `-p`, `--provider`: `gemini`, `antigravity` (alias for `gemini`), `claude`, or `claude,antigravity`
+- `--fallback`: fallback provider (`claude`, `gemini`, or `antigravity`) if the primary provider fails or returns no findings list
 - `--gemini-model`: `neon` (default, `gemini-4-neon`), `carbon`, `argon`, `hydrogen`, or full id
 - `--claude-model`: `opus` (default), `sonnet`, `haiku`, or full id
 - `-e`, `--effort`: `low`, `medium`, `high` (default), `xhigh`, `max`
