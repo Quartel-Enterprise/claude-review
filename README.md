@@ -1,19 +1,52 @@
 # ai-review
 
-GitHub Actions that review a pull request with **Claude**, **Gemini**, or **both at once**,
-optionally fix what the review found, and hold the pull request's checks until the review ends and
-its threads are resolved. They work for any repository and any language: the review reads the diff
-and the files of the checkout, and runs none of your code.
+AI code review with **Claude**, **Gemini**, or **both at once** — **locally before you even open a
+pull request** (via the `ai-review` CLI or `/ai-review` agent skill) and **automatically in GitHub
+Actions**. It works for any repository and any language: the reviewer reads the diff and files of
+the checkout, and runs none of your code.
 
-| Action | What it does |
+| Surface | What it does |
 | --- | --- |
-| `review` | Runs Claude Code (`opus` at `high` effort by default), Gemini CLI (`gemini-4-neon` at `high` thinking level by default), or both, optionally applies fixes, and posts all findings as one pull request review with clear provider attribution |
-| `gate` | Waits for the opening review of the pull request's commit, and tells your check workflows whether to run |
-| `threads` | Counts the review's unresolved threads, or re-runs the checks the gate held for them |
+| **Local CLI & `/ai-review` skill** | Reviews your local branch, staged changes, or any pull request before opening or merging a PR — using your existing **Claude Code** (`claude`) and **Google Antigravity** (`agy`) subscriptions (or API keys), with zero git clone required |
+| **`review` (GitHub Action)** | Runs Claude Code (`opus` at `high` effort by default), Gemini CLI (`gemini-4-neon` at `high` thinking level by default), or both in CI, optionally applies fixes, and posts all findings as one pull request review with clear provider attribution |
+| **`gate` (GitHub Action)** | Waits for the opening review of the pull request's commit, and tells your check workflows whether to run |
+| **`threads` (GitHub Action)** | Counts the review's unresolved threads, or re-runs the checks the gate held for them |
 
-Only `review` is needed to get a review on every pull request. Add `gate` and `threads` when the
-review pushes fixes (`fix: 'true'`) and you want your checks (build, tests, lint) to run once, on the
-final commit, instead of once on the opened commit and again on the fix commit.
+You can use the **local CLI / skill on its own** (no CI setup needed), use **`review` in CI on its
+own**, or combine both (for example, Gemini locally via your subscription + Claude in CI). Add
+`gate` and `threads` when CI pushes fixes (`fix: 'true'`) and you want your checks (build, tests,
+lint) to run once, on the final commit, instead of once on the opened commit and again on the fix
+commit.
+
+## Local review (before opening a PR)
+
+Review your branch or staged changes right from your terminal — or from Antigravity, Claude Code,
+or Codex via `/ai-review` — before pushing or opening a pull request:
+
+```bash
+# Install the CLI + /ai-review skill (no git clone required)
+curl -fsSL https://raw.githubusercontent.com/Quartel-Enterprise/ai-review/main/install.sh | bash
+
+# Or install only the Agent Skill
+npx skills add Quartel-Enterprise/ai-review
+```
+
+```bash
+# Review your current branch against main (read-only, never posts to GitHub)
+ai-review
+
+# Review only staged changes before committing
+ai-review --staged
+
+# Run Claude and Gemini in parallel on your local changes
+ai-review --provider claude,antigravity --effort high
+
+# Review an existing PR locally (add --post to publish as one GitHub PR review)
+ai-review --provider claude --pr 42
+```
+
+Update anytime with `ai-review update`. See [Local review & hybrid setup](docs/local.md) for all
+flags, `--fix`, `--json`, and subscription/API key configuration.
 
 ## What you get
 
