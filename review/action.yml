@@ -37,6 +37,10 @@ inputs:
     description: "Effort override for Gemini (low, medium, high, xhigh or max). Inherits 'effort' when empty."
     required: false
     default: ''
+  allow-custom-effort:
+    description: "'true' to allow non-standard effort levels beyond low/medium/high/xhigh/max (still rejects 'ultra'). Defaults to 'false'."
+    required: false
+    default: 'false'
   gemini-cli-version:
     description: "Pinned @google/gemini-cli version installed for Gemini runs."
     required: false
@@ -98,7 +102,7 @@ outputs:
     description: 'JSON object mapping each provider name to its execution duration in seconds.'
     value: ${{ steps.summary.outputs.provider-durations }}
   total-cost-usd:
-    description: 'Total reported/estimated cost in USD (after applying show-micro-costs).'
+    description: 'Total reported/estimated cost in USD (after applying show-micro-costs), or empty when no provider cost could be computed.'
     value: ${{ steps.summary.outputs.total-cost-usd }}
 
 runs:
@@ -117,6 +121,7 @@ runs:
         EFFORT: ${{ inputs.effort }}
         CLAUDE_EFFORT: ${{ inputs.claude-effort }}
         GEMINI_EFFORT: ${{ inputs.gemini-effort }}
+        ALLOW_CUSTOM_EFFORT: ${{ inputs.allow-custom-effort }}
         GEMINI_CLI_VERSION: ${{ inputs.gemini-cli-version }}
         MAX_FINDINGS: ${{ inputs.max-findings }}
         FIX: ${{ inputs.fix }}
@@ -188,6 +193,19 @@ runs:
         [[ "$gemini_model" =~ ^[A-Za-z0-9._:/-]+$ ]] || error "gemini-model '$raw_gemini' isn't a valid model alias or id."
         [[ "$GEMINI_CLI_VERSION" =~ ^[A-Za-z0-9._-]+$ ]] || error "gemini-cli-version '$GEMINI_CLI_VERSION' isn't a valid version."
 
+        for flag_name in fix cost show-micro-costs allow-custom-effort; do
+          case "$flag_name" in
+            fix) val=$FIX ;;
+            cost) val=$COST ;;
+            show-micro-costs) val=$SHOW_MICRO_COSTS ;;
+            allow-custom-effort) val=$ALLOW_CUSTOM_EFFORT ;;
+          esac
+          case "$val" in
+            true | false) ;;
+            *) error "$flag_name '$val' must be 'true' or 'false'." ;;
+          esac
+        done
+
         check_effort() {
           if ! [[ "$2" =~ ^[A-Za-z0-9-]+$ ]]; then
             error "$1 '$2' isn't a valid effort level."
@@ -195,7 +213,16 @@ runs:
           fi
           case "$2" in
             low | medium | high | xhigh | max) ;;
-            *) echo "::warning::$1 '$2' is not one of the standard levels (low, medium, high, xhigh, max); passing it through to the provider." ;;
+            ultra)
+              error "$1 'ultra' is not allowed in CI (it triggers cloud multi-agent review)."
+              ;;
+            *)
+              if [ "$ALLOW_CUSTOM_EFFORT" = true ]; then
+                echo "::warning::$1 '$2' is not one of the standard levels (low, medium, high, xhigh, max); passing it through because allow-custom-effort is 'true'."
+              else
+                error "$1 '$2' isn't one of low, medium, high, xhigh and max (set allow-custom-effort: 'true' to pass a custom level)."
+              fi
+              ;;
           esac
         }
         effort_norm=${EFFORT,,}
@@ -208,17 +235,6 @@ runs:
         check_effort "gemini-effort" "$gemini_effort"
 
         [[ "$MAX_FINDINGS" =~ ^(all|[1-9][0-9]*)$ ]] || error "max-findings '$MAX_FINDINGS' isn't 'all' or a number."
-        for flag_name in fix cost show-micro-costs; do
-          case "$flag_name" in
-            fix) val=$FIX ;;
-            cost) val=$COST ;;
-            show-micro-costs) val=$SHOW_MICRO_COSTS ;;
-          esac
-          case "$val" in
-            true | false) ;;
-            *) error "$flag_name '$val' must be 'true' or 'false'." ;;
-          esac
-        done
 
         if [ "$HAS_GITHUB_TOKEN" = true ]; then
           [ -n "$BOT_LOGIN" ] || error "bot-login is required when github-token is set."
@@ -427,7 +443,7 @@ runs:
         fi
         rm -rf "$state"
         mkdir -p "$dir" "$state"
-        cp "$GITHUB_ACTION_PATH"/{stop-hook.sh,post-review.sh,post-cost.sh,extract-findings.py,merge-findings.py,summarize-cost.py,commit-fixes.sh,bash-guard.sh,gemini-guard.sh,gemini-run.sh,gemini-prompt.md} "$dir/"
+        cp "$GITHUB_ACTION_PATH"/{stop-hook.sh,post-review.sh,post-cost.sh,extract-findings.py,merge-findings.py,pricing.py,summarize-cost.py,commit-fixes.sh,bash-guard.sh,gemini-guard.sh,gemini-run.sh,gemini-prompt.md} "$dir/"
         chmod +x "$dir"/*.sh
         chmod -R a-w "$dir"
 
@@ -549,6 +565,22 @@ runs:
           } >> "$GITHUB_OUTPUT"
         fi
 
+    # Security rationale for the Claude session:
+    # - A Bash command that reads or writes an arbitrary file would bypass Read/Edit rules: cat, grep,
+    #   jq, git diff --no-index and git blame --contents read any file, and git diff, log and show
+    #   write one with --output (which once let a prompt injection rewrite the Stop hook). So only
+    #   gh's read-only commands and safe git status/branch are allowed, enforced by bash-guard.sh.
+    #   Keep the command allowlist in sync across --allowedTools, bash-guard.sh, gemini-guard.sh /
+    #   gemini-run.sh, the prompt, and docs/security-model.md.
+    # - Claude Code's native Linux build has no Grep or Glob tool unless --tools names them, and Bash
+    #   grep/find are refused, so --tools must list every tool the review uses (with Edit only when
+    #   fix is true).
+    # - Some /code-review recipes spawn background review agents, and claude-code-action ends the
+    #   session at the first result before background agents finish (anthropics/claude-code-action#1646).
+    #   CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 forces agents to run in the foreground, and
+    #   ScheduleWakeup/Monitor/SendMessage are disallowed.
+    # - CLAUDE_CODE_SUBPROCESS_ENV_SCRUB runs every Bash command in bubblewrap + socat; Ubuntu's
+    #   AppArmor userns restriction is lifted on the throwaway runner VM so the sandbox can start.
     - name: Install the sandbox's dependencies
       if: steps.event.outputs.review == 'true' && steps.config.outputs.run-claude == 'true'
       shell: bash
@@ -771,15 +803,20 @@ runs:
         # Only push fixes from the fallback step when Claude didn't own the App OIDC token
         # (i.e. Gemini-only runs or runs with an explicit custom github-token). Otherwise a
         # GITHUB_TOKEN push would skip downstream check workflows on the fix commit.
-        if [ "$FIX" = true ] && [ ! -f "$STATE/.pushed" ] && { [ "$RUN_CLAUDE" != true ] || [ "$HAS_GITHUB_TOKEN" = true ]; }; then
-          if [ "$claude_reverted" = true ]; then
-            echo "::notice::Reverted unconfirmed Claude edits and restored confirmed Gemini patch before committing."
-          fi
-          if sha=$("$TOOLS/commit-fixes.sh" <<< "$findings" 2> "$STATE/.commit-log"); then
-            echo "$sha" > "$STATE/.pushed"
-            echo "Pushed the fixes as $sha"
-          else
-            echo "::notice::No fixes pushed: $(tr '\n' ' ' < "$STATE/.commit-log")"
+        if [ "$FIX" = true ] && [ ! -f "$STATE/.pushed" ]; then
+          if [ "$RUN_CLAUDE" != true ] || [ "$HAS_GITHUB_TOKEN" = true ]; then
+            if [ "$claude_reverted" = true ]; then
+              echo "::notice::Reverted unconfirmed Claude edits and restored confirmed Gemini patch before committing."
+            fi
+            if sha=$("$TOOLS/commit-fixes.sh" <<< "$findings" 2> "$STATE/.commit-log"); then
+              echo "$sha" > "$STATE/.pushed"
+              echo "Pushed the fixes as $sha"
+            else
+              echo "::notice::No fixes pushed: $(tr '\n' ' ' < "$STATE/.commit-log")"
+            fi
+          elif jq -e 'any(.[]; type == "object" and .outcome == "fixed")' <<< "$findings" > /dev/null 2>&1; then
+            echo "::warning::Skipping fix push in fallback step because Claude's App token is no longer available (set github-token to allow fallback pushes). Marking fixed findings as skipped."
+            findings=$(jq -c 'map(if type == "object" and .outcome == "fixed" then .outcome = "skipped" else . end)' <<< "$findings")
           fi
         fi
         if [ -f "$STATE/.pushed" ]; then
@@ -814,13 +851,13 @@ runs:
           {
             echo "total-duration-seconds=$(jq -r '.total_duration_seconds // 0' "$STATE/summary.json")"
             echo "provider-durations=$(jq -c '.provider_durations // {}' "$STATE/summary.json")"
-            echo "total-cost-usd=$(jq -r '.total_cost_usd // 0' "$STATE/summary.json")"
+            echo "total-cost-usd=$(jq -r '.total_cost_usd // ""' "$STATE/summary.json")"
           } >> "$GITHUB_OUTPUT"
         else
           {
             echo "total-duration-seconds=0"
             echo "provider-durations={}"
-            echo "total-cost-usd=0"
+            echo "total-cost-usd="
           } >> "$GITHUB_OUTPUT"
         fi
 

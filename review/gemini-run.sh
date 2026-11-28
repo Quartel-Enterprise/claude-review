@@ -59,7 +59,7 @@ thinking_level=$(resolve_thinking_level "$model" "$effort")
 
 echo "Running Gemini review with model=$model (thinkingLevel=$thinking_level, effort=$effort)"
 
-cli_prefix="$RUNNER_TEMP/ai-review-gemini-cli"
+cli_prefix="$RUNNER_TEMP/ai-review-gemini-cli-${cli_version}"
 gemini_bin="$cli_prefix/node_modules/.bin/gemini"
 if [ ! -x "$gemini_bin" ]; then
   # Scrub API and GitHub tokens from npm install so lifecycle scripts cannot access them.
@@ -185,7 +185,7 @@ chmod -R a-w "$cfg_dir"
 
 prompt_file="$state/gemini-prompt.txt"
 python3 - "$dir/gemini-prompt.md" "$prompt_file" <<'PY'
-import os, pathlib, sys
+import os, pathlib, re, sys
 
 template = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 fix = os.environ.get("FIX", "false") == "true"
@@ -217,9 +217,8 @@ replacements = {
     "__EARLIER_COMMENTS__": os.environ.get("EARLIER_COMMENTS", ""),
     "__EXTRA_INSTRUCTIONS__": os.environ.get("EXTRA_INSTRUCTIONS", ""),
 }
-text = template
-for k, v in replacements.items():
-    text = text.replace(k, v)
+pattern = re.compile("|".join(re.escape(k) for k in replacements))
+text = pattern.sub(lambda m: replacements[m.group(0)], template)
 pathlib.Path(sys.argv[2]).write_text(text.strip() + "\n", encoding="utf-8")
 PY
 

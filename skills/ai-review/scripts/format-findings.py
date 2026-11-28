@@ -3,60 +3,18 @@ import json
 import os
 import sys
 
+from pricing import MICRO_COST_THRESHOLD_USD, fmt_duration, fmt_usd, lookup_rate
+
 BADGES = {
     "must-fix": "🔴 MUST FIX",
     "should-fix": "🟡 SHOULD FIX",
     "nitpick": "⚪ NITPICK",
 }
 PROV_NAMES = {"claude": "Claude", "gemini": "Gemini"}
-MICRO_COST_THRESHOLD_USD = 0.01
-
-# Standard API rates per 1M tokens: (input, cached_input, output_and_thoughts).
-MODEL_PRICING_PER_1M = {
-    "gemini-4-carbon": (4.00, 1.00, 20.00),
-    "gemini-4-neon": (3.00, 0.75, 15.00),
-    "gemini-4-argon": (4.00, 1.00, 20.00),
-    "gemini-4-hydrogen": (1.50, 0.375, 7.50),
-    "gemini-3.8-flash": (0.50, 0.125, 3.00),
-    "gemini-3.5-flash": (0.30, 0.075, 2.50),
-    "gemini-3.5-flash-lite": (0.10, 0.025, 0.40),
-    "gemini-3-pro": (2.00, 0.50, 12.00),
-    "gemini-2.5-pro": (1.25, 0.3125, 10.00),
-    "gemini-2.5-flash": (0.30, 0.075, 2.50),
-    "gemini-2.5-flash-lite": (0.10, 0.025, 0.40),
-    "claude-opus-5-5": (5.00, 0.50, 25.00),
-    "claude-sonnet-5-5": (3.00, 0.30, 15.00),
-    "claude-haiku-5-5": (1.00, 0.10, 5.00),
-}
 
 
-def fmt_duration(seconds):
-    total = max(0, int(round(seconds)))
-    if total < 60:
-        return f"{total}s"
-    mins, secs = divmod(total, 60)
-    if mins < 60:
-        return f"{mins}m {secs}s"
-    hours, mins = divmod(mins, 60)
-    return f"{hours}h {mins}m {secs}s"
-
-
-def fmt_usd(amount):
-    if amount is None:
-        return "–"
-    if 0 < amount < 0.01:
-        return f"${round(amount, 4):.4f}".rstrip("0").rstrip(".")
-    return f"${amount:.2f}"
-
-
-def lookup_rate(model_name):
-    norm = (model_name or "").lower()
-    if "/" in norm:
-        norm = norm.split("/", 1)[1]
-    for prefix, rates in sorted(MODEL_PRICING_PER_1M.items(), key=lambda kv: -len(kv[0])):
-        if norm == prefix or norm.startswith(prefix + "-"):
-            return rates
-    return None
+def normalize_severity(raw):
+    return "-".join(str(raw or "should-fix").strip().lower().replace("_", "-").split())
 
 
 def compute_provider_cost(entry, show_micro_costs):
@@ -168,7 +126,7 @@ def main():
         for item in findings:
             if not isinstance(item, dict):
                 continue
-            sev = str(item.get("severity") or "should-fix").strip().lower().replace("_", "-")
+            sev = normalize_severity(item.get("severity"))
             if sev not in counts:
                 sev = "should-fix"
             counts[sev] += 1
@@ -226,7 +184,7 @@ def main():
     for idx, item in enumerate(findings, 1):
         if not isinstance(item, dict):
             continue
-        sev = str(item.get("severity") or "should-fix").strip().lower().replace("_", "-")
+        sev = normalize_severity(item.get("severity"))
         badge = BADGES.get(sev, BADGES["should-fix"])
         cat = item.get("category") or ""
         prov = str(item.get("provider") or "").strip().lower()

@@ -59,18 +59,25 @@ else:
 PY
 }
 
+ws_real=""
+rev_real=""
+if [ -n "$workspace" ]; then
+  ws_real=$(resolve_path "$workspace" "/") || ws_real=""
+fi
+if [ -n "$reviewed" ]; then
+  rev_real=$(resolve_path "$reviewed" "/") || rev_real=""
+fi
+
 is_inside() {
-  local target=$1 dir=$2
-  [ -n "$dir" ] || return 1
-  local real_dir
-  real_dir=$(resolve_path "$dir" "/") || return 1
+  local target=$1 real_dir=$2
+  [ -n "$real_dir" ] || return 1
   [ "$target" = "$real_dir" ] || [[ "$target" == "$real_dir/"* ]]
 }
 
 check_read_path() {
   local raw=$1
-  local resolved ws_real
-  ws_real=$(resolve_path "$workspace" "/") || deny "$tool_name" "couldn't resolve workspace"
+  local resolved
+  [ -n "$ws_real" ] || deny "$tool_name" "couldn't resolve workspace"
   resolved=$(resolve_path "$raw" "$ws_real") || deny "$tool_name" "couldn't resolve path"
   case "$resolved" in
     "$ws_real/.git" | "$ws_real/.git/"*)
@@ -80,7 +87,7 @@ check_read_path() {
   if is_inside "$resolved" "$ws_real"; then
     return 0
   fi
-  if [ -n "$reviewed" ] && is_inside "$resolved" "$reviewed"; then
+  if [ -n "$rev_real" ] && is_inside "$resolved" "$rev_real"; then
     return 0
   fi
   deny "$tool_name" "path '$raw' is outside the checkout"
@@ -173,8 +180,8 @@ extract_fields() {
 check_edit_path() {
   local raw=$1
   [ -n "$raw" ] || deny "$tool_name" "missing file_path"
-  local resolved ws_real
-  ws_real=$(resolve_path "$workspace" "/") || deny "$tool_name" "couldn't resolve workspace"
+  local resolved
+  [ -n "$ws_real" ] || deny "$tool_name" "couldn't resolve workspace"
   resolved=$(resolve_path "$raw" "$ws_real") || deny "$tool_name" "couldn't resolve path"
   if ! is_inside "$resolved" "$ws_real"; then
     deny "$tool_name" "path '$raw' is outside the checkout"

@@ -52,10 +52,19 @@ EOF
 
 lower() { tr '[:upper:]' '[:lower:]' <<< "$1"; }
 
+is_ai_review_clone() {
+  [ -n "$install_root" ] || return 1
+  [ -d "$install_root/.git" ] || return 1
+  [ -f "$install_root/skills/ai-review/scripts/ai-review.sh" ] || return 1
+  local top
+  top=$(git -C "$install_root" rev-parse --show-toplevel 2> /dev/null || echo "")
+  [ -n "$top" ] && [ "$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$top")" = "$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$install_root")" ]
+}
+
 cmd_version() {
   if [ -n "$install_root" ] && [ -f "$install_root/.ai-review-version" ]; then
     echo "ai-review $(cat "$install_root/.ai-review-version")"
-  elif [ -n "$install_root" ] && [ -d "$install_root/.git" ]; then
+  elif is_ai_review_clone; then
     local sha
     sha=$(git -C "$install_root" rev-parse --short HEAD 2> /dev/null || echo "dev")
     echo "ai-review git:${sha}"
@@ -78,7 +87,7 @@ cmd_update() {
     esac
   done
 
-  if [ -n "$install_root" ] && [ -d "$install_root/.git" ]; then
+  if is_ai_review_clone; then
     echo "Updating git clone at $install_root..."
     git -C "$install_root" pull --ff-only
     return 0
@@ -186,13 +195,16 @@ cmd_skills() {
             echo "✓ Skill already installed -> $target"
             continue
           fi
-          if [ ! -L "$target" ]; then
-            if [ "$force" = true ]; then
-              rm -rf "$target"
-            else
-              echo "! Skipping existing non-symlink directory/file at $target (pass --force to replace it)" >&2
+          if [ -L "$target" ]; then
+            if [ "$force" != true ]; then
+              echo "! Skipping existing symlink pointing elsewhere at $target -> $(readlink "$target") (pass --force to replace it)" >&2
               continue
             fi
+          elif [ "$force" = true ]; then
+            rm -rf "$target"
+          else
+            echo "! Skipping existing non-symlink directory/file at $target (pass --force to replace it)" >&2
+            continue
           fi
         fi
         ln -sfn "$skill_dir" "$target"
@@ -378,7 +390,6 @@ resolve_agy_gemini_model() {
     carbon | gemini-4-carbon) base="gemini-4-carbon" ;;
     argon | gemini-4-argon) base="gemini-4-argon" ;;
     hydrogen | gemini-4-hydrogen) base="gemini-4-hydrogen" ;;
-    *-low | *-medium | *-high | *-xhigh) echo "$m"; return 0 ;;
     *) echo "$m"; return 0 ;;
   esac
   case "$e" in
@@ -403,7 +414,10 @@ resolve_agy_claude_model() {
   case "$m" in
     opus | claude-opus-5-5) base="claude-opus-5-5" ;;
     sonnet | claude-sonnet-5-5) base="claude-sonnet-5-5" ;;
-    *-low | *-medium | *-high) echo "$m"; return 0 ;;
+    haiku)
+      echo "Model alias 'haiku' is not available via --claude-engine agy; use --claude-engine claude or pass a full model id." >&2
+      return 2
+      ;;
     *) echo "$m"; return 0 ;;
   esac
   case "$e" in
@@ -477,7 +491,7 @@ build_prompt() {
     combined_extra="${combined_extra:+${combined_extra}$'\n\n'}${extra_note}"
   fi
   python3 - "$out_file" "$diff_file" "$target_desc" "$eff" "$max_findings" "$fix" "$combined_extra" "$max_bytes" <<'PY'
-import pathlib, sys
+import pathlib, re, sys
 
 out_path, diff_path, target_desc, effort, max_findings, fix_str, extra, max_bytes_s = sys.argv[1:9]
 max_bytes = int(max_bytes_s)
@@ -504,6 +518,8 @@ else:
     fix_block = "Read-only review: do not edit, create, or delete any files, and do not commit or push."
     outcome_line = ""
 
+diff_fence = "`" * max(3, max((len(m) for m in re.findall(r"`+", diff_text)), default=0) + 1)
+
 prompt = f"""Review {target_desc} in this repository thoroughly and objectively.
 
 ## Instructions
@@ -521,9 +537,9 @@ Write `[]` inside the ```json fence when there are no findings.
 {extra}
 
 ## Diff to review
-```diff
+{diff_fence}diff
 {diff_text}
-```
+{diff_fence}
 """
 pathlib.Path(out_path).write_text(prompt, encoding="utf-8")
 PY
@@ -830,15 +846,18 @@ fi
 
 if [ "$post_pr" = true ]; then
   repo_nwo=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
+  gh_login=$(gh api user --jq .login 2> /dev/null || echo "")
   if [ "$json_output" = true ]; then
     GITHUB_REPOSITORY="$repo_nwo" \
       GITHUB_WORKSPACE="$workspace" \
+      BOT_LOGIN="${BOT_LOGIN:-$gh_login}" \
       PROVIDERS="$providers_csv" \
       PROVIDER_WARNINGS="$provider_warnings" \
       "$scripts_dir/post-review.sh" "$pr_number" <<< "$merged" >&2
   else
     GITHUB_REPOSITORY="$repo_nwo" \
       GITHUB_WORKSPACE="$workspace" \
+      BOT_LOGIN="${BOT_LOGIN:-$gh_login}" \
       PROVIDERS="$providers_csv" \
       PROVIDER_WARNINGS="$provider_warnings" \
       "$scripts_dir/post-review.sh" "$pr_number" <<< "$merged"

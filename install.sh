@@ -46,7 +46,10 @@ for cmd in curl tar python3; do
   command -v "$cmd" > /dev/null 2>&1 || { echo "Missing required command: $cmd" >&2; exit 1; }
 done
 
-if [ -z "$version" ]; then
+explicit_version=false
+if [ -n "$version" ]; then
+  explicit_version=true
+else
   latest=$(curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" 2> /dev/null |
     python3 -c 'import json, sys
 try:
@@ -60,25 +63,39 @@ fi
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-# Try tag tarball first, then branch tarball.
-tarball="$tmp/ai-review.tar.gz"
-url_tag="https://github.com/${repo}/archive/refs/tags/${version}.tar.gz"
-url_head="https://github.com/${repo}/archive/refs/heads/${version}.tar.gz"
+download_and_extract() {
+  local ver=$1
+  local tarball="$tmp/ai-review.tar.gz"
+  local url_tag="https://github.com/${repo}/archive/refs/tags/${ver}.tar.gz"
+  local url_head="https://github.com/${repo}/archive/refs/heads/${ver}.tar.gz"
 
-echo "Downloading ai-review (${repo}@${version})..."
-if ! curl -fsSL "$url_tag" -o "$tarball" 2> /dev/null; then
-  if ! curl -fsSL "$url_head" -o "$tarball" 2> /dev/null; then
+  echo "Downloading ai-review (${repo}@${ver})..."
+  if ! curl -fsSL "$url_tag" -o "$tarball" 2> /dev/null; then
+    if ! curl -fsSL "$url_head" -o "$tarball" 2> /dev/null; then
+      return 1
+    fi
+  fi
+  rm -rf "$tmp/extract"
+  mkdir -p "$tmp/extract"
+  tar -xzf "$tarball" -C "$tmp/extract" --strip-components=1
+}
+
+if ! download_and_extract "$version"; then
+  echo "Failed to download ${repo}@${version} from GitHub." >&2
+  exit 1
+fi
+
+entry="$tmp/extract/skills/ai-review/scripts/ai-review.sh"
+if [ ! -f "$entry" ] && [ "$explicit_version" = false ] && [ "$version" != "main" ]; then
+  echo "Latest release '${version}' does not contain v2 ai-review; falling back to 'main'..." >&2
+  version="main"
+  if ! download_and_extract "$version"; then
     echo "Failed to download ${repo}@${version} from GitHub." >&2
     exit 1
   fi
 fi
-
-mkdir -p "$tmp/extract"
-tar -xzf "$tarball" -C "$tmp/extract" --strip-components=1
-
-entry="$tmp/extract/skills/ai-review/scripts/ai-review.sh"
 if [ ! -f "$entry" ]; then
-  echo "Downloaded archive does not contain skills/ai-review/scripts/ai-review.sh (is version '${version}' v2+?) " >&2
+  echo "Downloaded archive does not contain skills/ai-review/scripts/ai-review.sh (is version '${version}' v2?)" >&2
   exit 1
 fi
 chmod +x "$entry" "$tmp/extract/skills/ai-review/scripts/post-review.sh"

@@ -40,7 +40,7 @@ fi
 
 changed=$(safe_git diff --name-only)
 [ -n "$changed" ] || fail "the working tree has no change"
-if grep -qE '^\.(github|claude|gemini)/' <<< "$changed"; then
+if safe_git diff --name-only -z | grep -zqE '^\.(github|claude|gemini)/'; then
   fail "the fixes change files under .github, .claude or .gemini"
 fi
 untracked=$(safe_git ls-files --others --exclude-standard)
@@ -52,7 +52,7 @@ redact() { "$(dirname "$0")/post-review.sh" --redact; }
 added=$(safe_git diff -U0 | awk '/^diff --git /{hunk = 0} /^@@/{hunk = 1; next} hunk && /^\+/')
 [ "$(redact <<< "$added")" = "$added" ] || fail "the fixes add a token-shaped string"
 
-# Format commit message title from active providers ("AI", "Claude", "Gemini", or "Claude + Gemini").
+# Format commit message title from active providers ("Claude" or "Gemini" for one provider, "AI" otherwise).
 provider_label="AI"
 if [ -n "${PROVIDERS:-}" ]; then
   provider_label=$(jq -rn --arg p "$PROVIDERS" '

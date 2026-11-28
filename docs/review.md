@@ -18,6 +18,7 @@ runs on `pull_request`. Drop `fix: 'true'` for a review that only comments.
 | `effort` | `'high'` | Shared default effort for all providers: `low`, `medium`, `high`, `xhigh` or `max` |
 | `claude-effort` | inherits `effort` | Optional effort override for Claude |
 | `gemini-effort` | inherits `effort` | Optional effort override for Gemini (maps to `thinkingLevel` up to each model's ceiling) |
+| `allow-custom-effort` | `'false'` | `'true'` to allow non-standard effort levels beyond `low`/`medium`/`high`/`xhigh`/`max` (`ultra` is always rejected) |
 | `gemini-cli-version` | `'0.71.1'` | Pinned `@google/gemini-cli` npm version |
 | `max-findings` | `'all'` | `'all'` or a positive number: each provider keeps at most that many findings, most severe first |
 | `fix` | `'false'` | `'true'` to apply clear, contained findings and push them as one commit to the pull request's branch |
@@ -34,7 +35,7 @@ runs on `pull_request`. Drop `fix: 'true'` for a review that only comments.
 | --- | --- |
 | `total-duration-seconds` | Sum of execution times across all enabled providers, in seconds |
 | `provider-durations` | JSON object mapping each provider name to its execution duration in seconds (e.g. `{"gemini":95,"claude":140}`) |
-| `total-cost-usd` | Total reported/estimated cost in USD (after applying `show-micro-costs`) |
+| `total-cost-usd` | Total reported/estimated cost in USD (after applying `show-micro-costs`), or empty when no provider's cost could be computed |
 
 ## Gemini models and thinking levels
 

@@ -268,9 +268,6 @@ Fixed in $FIXED_IN:
 fi
 
 hunks='[]'
-if [ -n "$head_sha" ] && [ -z "$base_sha" ]; then
-  base_sha=""
-fi
 if [ -n "$head_sha" ] && [ -n "$base_sha" ]; then
   # shellcheck disable=SC2016 # $file is jq's, not the shell's
   if ! hunks=$(gh api --paginate "repos/$repo/compare/$base_sha...$head_sha?per_page=100" \

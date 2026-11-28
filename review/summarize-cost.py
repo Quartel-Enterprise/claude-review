@@ -17,24 +17,9 @@ import pathlib
 import re
 import sys
 
-MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._:/-]+(\[[0-9a-z]+\])?$")
-MICRO_COST_THRESHOLD_USD = 0.01
+from pricing import MICRO_COST_THRESHOLD_USD, fmt_duration, fmt_usd, lookup_rate
 
-# Standard Gemini API token pricing per 1M tokens: (input, cached_input, output_and_thoughts).
-# Rates reflect Google AI Studio standard tier (Dec 2026+ for Gemini 4).
-GEMINI_PRICING_PER_1M = {
-    "gemini-4-carbon": (4.00, 1.00, 20.00),
-    "gemini-4-neon": (3.00, 0.75, 15.00),
-    "gemini-4-argon": (4.00, 1.00, 20.00),
-    "gemini-4-hydrogen": (1.50, 0.375, 7.50),
-    "gemini-3.8-flash": (0.50, 0.125, 3.00),
-    "gemini-3.5-flash": (0.30, 0.075, 2.50),
-    "gemini-3.5-flash-lite": (0.10, 0.025, 0.40),
-    "gemini-3-pro": (2.00, 0.50, 12.00),
-    "gemini-2.5-pro": (1.25, 0.3125, 10.00),
-    "gemini-2.5-flash": (0.30, 0.075, 2.50),
-    "gemini-2.5-flash-lite": (0.10, 0.025, 0.40),
-}
+MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._:/-]+(\[[0-9a-z]+\])?$")
 
 
 def load_json(path_str):
@@ -53,40 +38,18 @@ def is_valid_model_id(name):
     return isinstance(name, str) and bool(MODEL_ID_RE.match(name))
 
 
-def fmt_usd(amount):
-    if amount is None:
-        return "–"
-    if 0 < amount < 0.01:
-        return f"${round(amount, 4):.4f}".rstrip("0").rstrip(".")
-    return f"${amount:.2f}"
+def provider_findings_info(state_dir, provider):
+    """Returns (has_findings_file, has_fixed_finding) for a provider."""
+    if not state_dir:
+        return (False, None)
+    data = load_json(os.path.join(state_dir, f"{provider}-findings.json"))
+    if not isinstance(data, list):
+        return (False, None)
+    has_fixed = any(isinstance(item, dict) and item.get("outcome") == "fixed" for item in data)
+    return (True, has_fixed)
 
 
-def fmt_duration(seconds):
-    if seconds is None or seconds < 0:
-        return "–"
-    total = int(round(seconds))
-    if total < 60:
-        return f"{total}s"
-    mins, secs = divmod(total, 60)
-    if mins < 60:
-        return f"{mins}m {secs}s"
-    hours, mins = divmod(mins, 60)
-    return f"{hours}h {mins}m {secs}s"
-
-
-def lookup_gemini_rate(model_name):
-    normalized = model_name.lower()
-    if "/" in normalized:
-        normalized = normalized.split("/", 1)[1]
-    if normalized in GEMINI_PRICING_PER_1M:
-        return GEMINI_PRICING_PER_1M[normalized]
-    for prefix, rates in sorted(GEMINI_PRICING_PER_1M.items(), key=lambda kv: -len(kv[0])):
-        if normalized.startswith(prefix + "-"):
-            return rates
-    return None
-
-
-def parse_claude(exec_path, meta, wanted_model, effort, fixed, show_micro_costs):
+def parse_claude(exec_path, meta, wanted_model, effort, fixed, show_micro_costs, has_findings=False):
     meta_duration = None
     if isinstance(meta, dict) and isinstance(meta.get("duration_seconds"), (int, float)):
         meta_duration = int(round(meta["duration_seconds"]))
@@ -94,7 +57,7 @@ def parse_claude(exec_path, meta, wanted_model, effort, fixed, show_micro_costs)
     meta_effort = meta.get("effort") if isinstance(meta, dict) else effort
 
     def duration_only_fallback():
-        if meta_duration is None or meta_duration <= 0:
+        if not has_findings or meta_duration is None or meta_duration <= 0:
             return None
         fallback_rows = []
         if meta_model and is_valid_model_id(meta_model):
@@ -233,7 +196,7 @@ def parse_claude(exec_path, meta, wanted_model, effort, fixed, show_micro_costs)
     }
 
 
-def parse_gemini(exec_path, meta, wanted_model, effort, fixed, show_micro_costs):
+def parse_gemini(exec_path, meta, wanted_model, effort, fixed, show_micro_costs, has_findings=False):
     data = load_json(exec_path)
     meta_duration = None
     if isinstance(meta, dict) and isinstance(meta.get("duration_seconds"), (int, float)):
@@ -248,7 +211,12 @@ def parse_gemini(exec_path, meta, wanted_model, effort, fixed, show_micro_costs)
             models_stats = stats["models"]
 
     meta_status = meta.get("status") if isinstance(meta, dict) else None
-    if not models_stats and (meta_status == "install_failed" or meta_duration is None or meta_duration <= 0):
+    if not models_stats and (
+        not has_findings
+        or meta_status == "install_failed"
+        or meta_duration is None
+        or meta_duration <= 0
+    ):
         return None
 
     rows = []
@@ -271,7 +239,7 @@ def parse_gemini(exec_path, meta, wanted_model, effort, fixed, show_micro_costs)
 
             uncached_prompt = max(0, prompt_tok - cached_tok)
             output_tok = cand_tok + thought_tok
-            rates = lookup_gemini_rate(model_id)
+            rates = lookup_rate(model_id)
             if rates is not None:
                 in_rate, cache_rate, out_rate = rates
                 cost = (
@@ -374,14 +342,21 @@ def main():
     run_url = os.environ.get("RUN_URL", "")
     run_tag = os.environ.get("RUN_TAG", "")
 
+    gemini_has_findings, gemini_has_fixed = provider_findings_info(state_dir, "gemini")
+    claude_has_findings, claude_has_fixed = provider_findings_info(state_dir, "claude")
+    gemini_fixed = fixed and (gemini_has_fixed if gemini_has_fixed is not None else True)
+    claude_fixed = fixed and (claude_has_fixed if claude_has_fixed is not None else True)
+
     summaries = []
     gemini_summary = parse_gemini(
-        gemini_exec, gemini_meta, gemini_model, gemini_effort, fixed, show_micro_costs
+        gemini_exec, gemini_meta, gemini_model, gemini_effort, gemini_fixed, show_micro_costs,
+        has_findings=gemini_has_findings,
     )
     if gemini_summary:
         summaries.append(gemini_summary)
     claude_summary = parse_claude(
-        claude_exec, claude_meta, claude_model, claude_effort, fixed, show_micro_costs
+        claude_exec, claude_meta, claude_model, claude_effort, claude_fixed, show_micro_costs,
+        has_findings=claude_has_findings,
     )
     if claude_summary:
         summaries.append(claude_summary)
@@ -389,7 +364,7 @@ def main():
     if not summaries:
         print(json.dumps({
             "body": "",
-            "total_cost_usd": 0.0,
+            "total_cost_usd": None,
             "total_duration_seconds": 0,
             "provider_durations": {},
         }))
@@ -460,7 +435,7 @@ def main():
 
     print(json.dumps({
         "body": "\n".join(lines),
-        "total_cost_usd": round(total_cost, 6) if total_cost is not None else 0.0,
+        "total_cost_usd": round(total_cost, 6) if total_cost is not None else None,
         "total_duration_seconds": total_duration,
         "provider_durations": provider_durations,
     }))

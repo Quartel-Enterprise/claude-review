@@ -10,7 +10,7 @@ shellcheck install.sh review/*.sh threads/*.sh scripts/*.sh local/*.sh skills/ai
 python3 -m py_compile review/*.py skills/ai-review/scripts/*.py
 
 # Keep bundled self-contained skill scripts in sync with review/.
-for f in extract-findings.py merge-findings.py post-review.sh; do
+for f in extract-findings.py merge-findings.py post-review.sh pricing.py; do
   if ! cmp -s "review/$f" "skills/ai-review/scripts/$f"; then
     echo "error: skills/ai-review/scripts/$f differs from review/$f" >&2
     exit 1
