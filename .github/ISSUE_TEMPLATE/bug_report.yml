@@ -7,7 +7,7 @@ body:
     attributes:
       value: |
         Don't paste tokens, or anything from a private repository. For a vulnerability, use
-        [private vulnerability reporting](https://github.com/Quartel-Enterprise/claude-review/security/advisories/new).
+        [private vulnerability reporting](https://github.com/Quartel-Enterprise/ai-review/security/advisories/new).
   - type: dropdown
     id: action
     attributes:
@@ -24,7 +24,7 @@ body:
     attributes:
       label: Version
       description: The release in your `uses:`
-      placeholder: 1.5.0
+      placeholder: 2.0.0
     validations:
       required: true
   - type: textarea

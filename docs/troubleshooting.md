@@ -1,15 +1,17 @@
 # When something goes wrong
 
-The run's log shows what the Stop hook saw and any warnings, but not Claude's output.
+The run's log shows what the guards and hooks saw, per-provider durations, and any warnings, but
+never raw model output.
 
 | What you see | Why, and what to do |
 | --- | --- |
-| The run fails at "Check the inputs" | An input is invalid: the error names it. Both or neither of `oauth-token` and `anthropic-api-key` set is the usual one; on a Dependabot pull request the secret is empty (see the `if` in the [workflow](../README.md#setup)) |
-| The run fails on authentication | The OAuth token expired or was revoked, or the API key is wrong: replace the secret |
-| A green run, a "workflow validation" warning, no review | The pull request changes the review's workflow file: see [Setup](../README.md#setup), step 4 |
-| A review by `github-actions[bot]` instead of `claude[bot]` | The session couldn't post (no App token, a GitHub outage), so the action posted the same findings with the workflow's token. If it happens on every run, check the App's installation and the job's `id-token: write` |
-| A review saying "The review ended without a findings list" | The session stopped without its findings (a refusal, a skill that stopped early, a session that never ran). Follow the link to the run |
-| Warning "bubblewrap can't start a sandbox on this runner" | The review's Bash commands fail, so it has no diff. Use a GitHub-hosted `ubuntu-latest` runner |
-| Warning "The review was denied ..." or "The review's Bash guard refused ..." | The review tried a tool it isn't allowed. Usually harmless; see the [security model](security-model.md) before allowing one |
-| No review and a failed, timed-out job | The job hit `timeout-minutes`, and no step runs after that. Raise it, or lower `effort` or `max-findings` |
-| Findings fixed but no fix commit | Nothing is pushed in the cases listed under [Fixes](review.md#fixes); the run's log says which |
+| The run fails at "Check the inputs" | An input is missing or invalid: the error names it. Common causes: `providers` missing/unknown, `gemini-api-key` missing when `gemini` is enabled, neither or both of `claude-oauth-token` and `anthropic-api-key` set when `claude` is enabled, or `bot-login`/`bot-id` missing when `github-token` is set |
+| The run fails on authentication | The Claude OAuth token expired/revoked, or the Anthropic/Gemini API key is invalid: replace the secret |
+| A green run, a "workflow validation" warning, no Claude review | The pull request changes the review's workflow file (Claude Code Action refuses to run on PRs editing its own workflow) |
+| A review by `github-actions[bot]` instead of your App | Either no `github-token` was supplied (default on Gemini-only runs) or the session couldn't post with the App token, so the fallback step posted with `github.token` |
+| A review saying "The review ended without a findings list" | No enabled provider returned a valid JSON findings array. Check the run link for exit codes or install warnings |
+| Warning "Gemini ended without a findings list" inside a multi-provider review | One provider succeeded while the other failed to produce findings; the review still posts the successful provider's findings transparently |
+| Warning "bubblewrap can't start a sandbox on this runner" | Claude's Bash commands need `bubblewrap` and `socat` on a GitHub-hosted `ubuntu-latest` runner |
+| Warning "The review's guard refused ..." or "The review was denied ..." | A provider tried a tool or shell command outside the security allowlist. Usually harmless; review the [security model](security-model.md) before allowing anything |
+| No review and a failed, timed-out job | The job hit `timeout-minutes`. Raise it, lower `effort`, or run `claude` and `gemini` as two parallel matrix jobs |
+| Findings fixed but no fix commit | Nothing is pushed in the cases listed under [Fixes](review.md#fixes); the run's log says why |

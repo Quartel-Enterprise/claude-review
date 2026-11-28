@@ -1,111 +1,66 @@
 #!/usr/bin/env bash
-# Posts what a Claude review run cost as a comment on its pull request. Usage:
+# Aggregates cost and timing for an AI review run (Claude, Gemini, or both), writes machine-readable
+# summary outputs to STATE/summary.json, and optionally posts one comment on the pull request.
 #
-#   EXECUTION_FILE=<the session's execution file> post-cost.sh <pr-number>
+# Usage:
+#   post-cost.sh <pr-number>
 #
-# The cost is the "total_cost_usd" Claude Code reports in the session's final result, which also holds
-# the review's fix, since both run in one session and the result has no figure for each. It is
-# computed by Claude Code from the tokens it counted, not read off an invoice, and it is a guess at
-# the default model's rate for a model Claude Code has no price for. With a subscription token
-# (OAUTH=true) nothing is billed per token, so the comment says the figure is what the same tokens
-# would cost through the API. STATE is the directory of the hook's markers: its .pushed says the fix
-# commit was pushed, which the comment then mentions.
+# Environment:
+#   GITHUB_REPOSITORY, CLAUDE_EXECUTION_FILE, GEMINI_EXECUTION_FILE, STATE,
+#   CLAUDE_MODEL, CLAUDE_EFFORT, GEMINI_MODEL, GEMINI_EFFORT,
+#   FIX, CLAUDE_OAUTH, SHOW_MICRO_COSTS, PROVIDERS, POST_COST (default: true)
 #
-# A comment carries its run and attempt in a hidden tag: a retry of this step updates it, while a
-# re-run of the job, which pays for a new session, gets a comment of its own. Only a comment of the
-# workflow's token counts as this script's, so another user's comment with the same tag is left alone.
-# A result with no cost, or a zero one (a session that crashed or never started reports zeros), posts
-# nothing: the posting step already tells the pull request such a run ended without a review.
-#
-# It never fails the review: whatever goes wrong here is a warning, and the exit status is 0. It
-# posts with the workflow's token (pull-requests: write), after the session, so it reads no secret.
+# Never fails the review: warnings are emitted on error and exit status is always 0.
 set -uo pipefail
 
+dir=$(cd "$(dirname "$0")" && pwd)
 pr=${1:?usage: post-cost.sh <pr-number>}
 repo=${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is not set}
-file=${EXECUTION_FILE:-}
+post_cost=${POST_COST:-true}
+state=${STATE:-}
 warn() { echo "::warning::$*" >&2; }
 
-if [ -z "$file" ] || [ ! -f "$file" ]; then
-  echo "The session left no execution file, so there is no cost to report."
-  exit 0
-fi
-
-# The last result of the session, reduced to what the comment shows. A model id is only kept when it
-# looks like one, and every number must be a number, so nothing else reaches the public comment.
-result=$(jq -c '
-  # The calls of the conversation per model: the assistant messages, once per API response (a response
-  # with several blocks comes as several messages with one id), told apart by whether a subagent made
-  # them. A model of the cost with no message here was called outside the conversation.
-  ([.[] | select(.type == "assistant" and (.message.model | type == "string"))
-    | {id: (.message.id // null), model: .message.model, sub: (.parent_tool_use_id != null)}]
-    | group_by([.id // (. | tostring), .model]) | map(.[0])
-    | group_by(.model) | map({key: .[0].model, value: {main: ([.[] | select(.sub | not)] | length), sub: ([.[] | select(.sub)] | length)}})
-    | from_entries) as $calls
-  | [.[] | select(.type == "result")] | last
-  | select(. != null and (.total_cost_usd | type == "number") and .total_cost_usd > 0)
-  | {cost: .total_cost_usd,
-     turns: (.num_turns | if type == "number" then . else null end),
-     seconds: (.duration_ms | if type == "number" then (. / 1000 | round) else null end),
-     models: [(.modelUsage // {}) | to_entries[]
-       | select((.key | test("^[A-Za-z0-9._:-]+(\\[[0-9a-z]+\\])?$")) and (.value.costUSD | type == "number"))
-       | {model: .key, cost: .value.costUSD, main: ($calls[.key].main // 0), sub: ($calls[.key].sub // 0)}]
-       | sort_by(-.cost)}' "$file" 2> /dev/null)
-if [ -z "$result" ]; then
-  echo "The session's result holds no cost, or a zero one, so there is none to report."
-  exit 0
-fi
-
 fixed=false
-{ [ "${FIX:-false}" = true ] && [ -n "${STATE:-}" ] && [ -f "$STATE/.pushed" ]; } && fixed=true
+{ [ "${FIX:-false}" = true ] && [ -n "$state" ] && [ -f "$state/.pushed" ]; } && fixed=true
 run_tag=""
-[ -z "${GITHUB_RUN_ID:-}" ] || run_tag="<!-- claude-review-cost run ${GITHUB_RUN_ID} attempt ${GITHUB_RUN_ATTEMPT:-1} -->"
+if [ -n "${GITHUB_RUN_ID:-}" ]; then
+  run_tag="<!-- ai-review-cost run ${GITHUB_RUN_ID} attempt ${GITHUB_RUN_ATTEMPT:-1}${PROVIDERS:+ providers ${PROVIDERS}} -->"
+fi
 run_url=""
 [ -z "${GITHUB_RUN_ID:-}" ] || run_url="${GITHUB_SERVER_URL:-https://github.com}/${repo}/actions/runs/${GITHUB_RUN_ID}"
 
-# shellcheck disable=SC2016 # the $ names are jq's, not the shell's
-body=$(jq -r --arg fixed "$fixed" --arg model "${MODEL:-}" --arg effort "${EFFORT:-}" --arg oauth "${OAUTH:-false}" --arg url "$run_url" --arg tag "$run_tag" '
-  # Two decimals, or four for a figure under a cent, so a small one still shows.
-  def usd: if . > 0 and . < 0.01 then "$" + (. * 10000 | round / 10000 | tostring)
-    else (. * 100 | round) as $cents
-      | "$\($cents / 100 | floor).\($cents % 100 | tostring | if length < 2 then "0" + . else . end)" end;
-  # The model the review runs on is the one the model input names (an alias such as opus matches
-  # claude-opus-5-5), else the most expensive one. The others are calls of the same session that the
-  # result gives no purpose for, and the effort is the review skill level, set for the review only.
-  ($model | ascii_downcase | sub("\\[[0-9a-z]+\\]$"; "")) as $wanted
-  | . as $r
-  | (([$r.models[] | select($wanted != "" and (.model | ascii_downcase | contains($wanted)))] | first) // $r.models[0] | .model?) as $main
-  | "### Review cost\n\n**\(.cost | usd)**"
-  + (if (.models | length) > 0 then "\n\n| Model | Effort | Used for | Cost |\n| --- | --- | --- | --- |\n"
-      + ([.models[] | . as $m
-        | "| `\($m.model)` | " + (if $m.model == $main and $effort != "" then "`\($effort)`" else "–" end)
-        + " | " + (
-            # What each model was used for, from the calls of the conversation it made.
-            ([if $m.main > 0 then "\($m.main) in the session" else empty end,
-              if $m.sub > 0 then "\($m.sub) in subagents" else empty end] | join(", ")) as $calls
-            | if $m.model == $main then (if $fixed == "true" then "the review and its fix commit" else "the review" end)
-                + (if $calls != "" then " (\($calls))" else "" end)
-              elif $m.main == 0 and $m.sub > 0 then "subagents (\($m.sub) call(s))"
-              elif $m.main > 0 then "turns of the session (\($calls))"
-              else "Claude Code calls outside the conversation" end)
-        + " | \($m.cost | usd) |"] | join("\n")) else "" end)
-  + "\n\n_Reported by Claude Code from the tokens it counted, not an invoice"
-  + (if $oauth == "true" then "; the run uses a subscription, so nothing is billed per token and this is what the same tokens would cost through the API" else "" end)
-  + (if .turns != null then ". \(.turns) turns" else "" end)
-  + (if .seconds != null then ", \(.seconds)s" else "" end)
-  + (if $url != "" then ". [The run](\($url))" else "" end)
-  + "._"
-  + (if $tag != "" then "\n\n" + $tag else "" end)' <<< "$result")
+summary=$(
+  FIXED="$fixed" \
+  RUN_URL="$run_url" \
+  RUN_TAG="$run_tag" \
+  python3 "$dir/summarize-cost.py" 2> /dev/null
+) || summary=""
 
-# The id of this run's comment, when the workflow's token already posted one.
+if [ -z "$summary" ]; then
+  echo "No cost or timing data was available to summarize."
+  exit 0
+fi
+
+if [ -n "$state" ] && [ -d "$state" ]; then
+  printf '%s\n' "$summary" > "$state/summary.json"
+fi
+
+if [ "$post_cost" != true ]; then
+  exit 0
+fi
+
+body=$(jq -r '.body // ""' <<< "$summary" 2> /dev/null)
+if [ -z "$body" ]; then
+  echo "The session left no cost or timing summary to report."
+  exit 0
+fi
+
 find_comment() {
   [ -n "$run_tag" ] || return 0
   RUN_TAG="$run_tag" gh api --paginate "repos/$repo/issues/$pr/comments" \
     --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | contains(env.RUN_TAG))) | .id' 2> /dev/null | tail -1
 }
 
-# Updates this run's comment when there is one, else adds it. Creating a comment isn't idempotent:
-# before each retry, a comment of this run means GitHub took the request whose answer was lost.
 existing=$(find_comment)
 url=""
 err=$(mktemp)
@@ -125,14 +80,11 @@ for attempt in 1 2 3; do
     url=$out
     break
   fi
-  # A refusal (a token without pull-requests: write, a comment that is gone) won't change by trying
-  # again; only a failure with no HTTP answer, or a server error, is retried. gh's message is only
-  # matched here, never printed.
   grep -qE 'HTTP (401|403|404|422)' "$err" && break
   [ "$attempt" -lt 3 ] && sleep $((attempt * 5))
 done
 if [ -n "$url" ]; then
-  echo "The cost was posted: $url"
+  echo "The cost & timing summary was posted: $url"
 else
   warn "The review's cost couldn't be posted (does the job have pull-requests: write?)."
 fi

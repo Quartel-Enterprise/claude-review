@@ -1,12 +1,21 @@
 #!/bin/bash
 
 # Lints the repository as CI does: shellcheck on the scripts and on every composite action's run
-# blocks (actionlint only reads workflows), then actionlint on the workflows.
+# blocks (actionlint only reads workflows), py_compile on every Python script, sync check between
+# review/ and the self-contained skill scripts, then actionlint on the workflows.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-shellcheck review/*.sh threads/*.sh scripts/*.sh
-python3 -m py_compile review/extract-findings.py
+shellcheck install.sh review/*.sh threads/*.sh scripts/*.sh local/*.sh skills/ai-review/scripts/*.sh
+python3 -m py_compile review/*.py skills/ai-review/scripts/*.py
+
+# Keep bundled self-contained skill scripts in sync with review/.
+for f in extract-findings.py merge-findings.py post-review.sh pricing.py; do
+  if ! cmp -s "review/$f" "skills/ai-review/scripts/$f"; then
+    echo "error: skills/ai-review/scripts/$f differs from review/$f" >&2
+    exit 1
+  fi
+done
 
 blocks=$(mktemp -d)
 trap 'rm -rf "$blocks"' EXIT

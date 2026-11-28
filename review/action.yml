@@ -1,60 +1,66 @@
-name: 'Claude review'
-description: 'Reviews the pull request with the /code-review skill bundled with Claude Code, optionally fixes the findings, and posts them as one review'
-
-# The review step only reviews: the findings come back as JSON in Claude's last message. A Stop hook
-# of the session (stop-hook.sh) then hands them to post-review.sh, which posts them as one pull
-# request review. The hook runs inside the session, so the review is posted as the App's bot user
-# (claude[bot], or bot-login with a github-token of your own App), with the App's token the action
-# gives the session and revokes when it ends: a step after the action couldn't use it. When the hook
-# didn't post (no token, a GitHub outage), the posting step below posts the same findings with the
-# workflow's token, as github-actions. The model posts nothing itself: the skill's --comment flag
-# posts one review per finding, each with its own notification, and a script run by the model
-# depends on a Bash allowlist the action didn't honour for it. The hook and the scripts it runs are
-# copied out of the action's own directory first, into a read-only directory the session can't
-# write: its Edit rule covers the checkout only, and none of the Bash commands it is allowed writes
-# a file (see the claude step). They come from the release the caller pins, never from the pull
-# request under review.
-#
-# With fix, the review also applies its findings to the working tree, and the hook commits them and
-# pushes the commit to the pull request's branch (commit-fixes.sh) before it posts: the review then
-# lists the fixed findings in its body, which opens no thread, and only the others as inline
-# comments. A push with the App's token starts the pull request's workflows on the new commit, which
-# a push with GITHUB_TOKEN wouldn't. The model may only edit files of the checkout, never under .git,
-# .github, .claude or .agent-memory, and never create a file.
+name: 'AI review'
+description: 'Reviews a pull request with Claude, Gemini, or both, optionally fixes findings, and posts them as one pull request review'
 
 inputs:
-  oauth-token:
-    description: 'A Claude Code OAuth token (claude setup-token): the reviews count against that Claude subscription. Set this or anthropic-api-key.'
+  providers:
+    description: "Comma-separated list of AI providers to run: 'claude', 'gemini' (or alias 'antigravity'), or 'claude,gemini'. Required."
+    required: true
+  claude-oauth-token:
+    description: 'A Claude Code OAuth token (claude setup-token). Required (or anthropic-api-key) when claude is enabled.'
     required: false
     default: ''
   anthropic-api-key:
-    description: 'An Anthropic API key: the reviews are billed per token. Set this or oauth-token.'
+    description: 'An Anthropic API key. Required (or claude-oauth-token) when claude is enabled.'
     required: false
     default: ''
-  model:
-    description: "The model of the review: an alias (opus, sonnet, haiku) or a full model id."
+  gemini-api-key:
+    description: 'A Google AI Studio Gemini API key. Required when gemini is enabled.'
     required: false
-    default: 'opus'
+    default: ''
+  claude-model:
+    description: "Model for Claude: an alias (opus, sonnet, haiku) or full model id. Defaults to 'opus' when claude is enabled."
+    required: false
+    default: ''
+  gemini-model:
+    description: "Model for Gemini: an alias (carbon, neon, argon, hydrogen) or full model id. Defaults to 'gemini-4-neon' when gemini is enabled."
+    required: false
+    default: ''
   effort:
-    description: "The /code-review skill's effort level: low, medium, high, xhigh or max. Higher finds more, some of it less certain, and costs more."
+    description: "Default review effort for all providers: low, medium, high, xhigh or max. Higher finds more and costs more."
     required: false
     default: 'high'
+  claude-effort:
+    description: "Effort override for Claude (low, medium, high, xhigh or max). Inherits 'effort' when empty."
+    required: false
+    default: ''
+  gemini-effort:
+    description: "Effort override for Gemini (low, medium, high, xhigh or max). Inherits 'effort' when empty."
+    required: false
+    default: ''
+  allow-custom-effort:
+    description: "'true' to allow non-standard effort levels beyond low/medium/high/xhigh/max (still rejects 'ultra'). Defaults to 'false'."
+    required: false
+    default: 'false'
+  gemini-cli-version:
+    description: "Pinned @google/gemini-cli version installed for Gemini runs."
+    required: false
+    default: '0.71.1'
   max-findings:
-    description: "How many findings the review reports at most, most severe first: 'all' or a number."
+    description: "How many findings each provider reports at most, most severe first: 'all' or a number."
     required: false
     default: 'all'
   github-token:
-    description: "A token of your own GitHub App, to review as that App instead of the Claude GitHub App. Set bot-login and bot-id to its bot user too."
+    description: "A token of your own GitHub App, to post and push as that App. When set, bot-login and bot-id are required."
     required: false
     default: ''
   bot-login:
-    description: "The login of the GitHub App's bot user the review posts as."
+    description: "The login of the bot user the review posts as (e.g. my-app[bot]). Required when github-token is set; otherwise defaults to claude[bot] (when claude is enabled) or github-actions[bot]."
     required: false
-    default: 'claude[bot]'
+    default: ''
   bot-id:
-    description: "The user id of that bot user (gh api 'users/<bot-login>' --jq .id), which the fix commit's author email carries so GitHub links the commit to it."
+    description: "The numeric user id of bot-login (gh api 'users/<bot-login>' --jq .id). Required when github-token is set."
     required: false
-    default: '209825114'
+    default: ''
   instructions:
     description: 'Extra instructions appended to the review prompt.'
     required: false
@@ -64,75 +70,223 @@ inputs:
     required: false
     default: ''
   memory-ssh-key:
-    description: 'A read-only deploy key of memory-repository.'
+    description: 'A read-only deploy key of memory-repository. Required when memory-repository is set.'
     required: false
     default: ''
   memory-files:
-    description: "The files of memory-repository the review reads, as a sparse-checkout pattern: only conventions, since the review may paraphrase them in public comments. Required with memory-repository: there is no default, so no caller sends every memory by forgetting it."
+    description: "Sparse-checkout pattern of files in memory-repository to read. Required when memory-repository is set."
     required: false
     default: ''
   fix:
-    description: "'true' to apply the findings and push them as a commit to the pull request's branch."
+    description: "'true' to apply clear, contained findings and push them as one commit to the pull request's branch."
     required: false
     default: 'false'
   cost:
-    description: "'true' to comment what the run cost on the pull request, as Claude Code reports it. 'false' to leave it out."
+    description: "'true' to comment the run's cost and timing on the pull request, 'false' to leave it out."
     required: false
     default: 'true'
+  show-micro-costs:
+    description: "'true' to include auxiliary models spending less than $0.01 (such as Haiku background calls) in the cost breakdown. Defaults to 'false'."
+    required: false
+    default: 'false'
   allowed-bots:
-    description: "Bots whose pull requests and pushes are reviewed too, as a comma-separated list of logins without [bot] (e.g. 'renovate,dependabot'). claude-code-action refuses a run a bot started unless it is listed. Empty for none."
+    description: "Bots whose pull requests and pushes are reviewed too, as a comma-separated list of logins without [bot] (e.g. 'renovate,dependabot'). Empty for none."
     required: false
     default: ''
+
+outputs:
+  total-duration-seconds:
+    description: 'Sum of execution times across all enabled providers, in seconds.'
+    value: ${{ steps.summary.outputs.total-duration-seconds }}
+  provider-durations:
+    description: 'JSON object mapping each provider name to its execution duration in seconds.'
+    value: ${{ steps.summary.outputs.provider-durations }}
+  total-cost-usd:
+    description: 'Total reported/estimated cost in USD (after applying show-micro-costs), or empty when no provider cost could be computed.'
+    value: ${{ steps.summary.outputs.total-cost-usd }}
+
 runs:
   using: "composite"
   steps:
-    # The inputs go into the session's command line and the skill's arguments, so each is checked
-    # against what it may hold before anything runs. The sandbox step installs packages with apt-get,
-    # which only an Ubuntu runner has.
-    - name: Check the inputs
+    - id: config
+      name: Check the inputs
       shell: bash
       env:
-        HAS_OAUTH_TOKEN: ${{ inputs.oauth-token != '' }}
-        HAS_API_KEY: ${{ inputs.anthropic-api-key != '' }}
-        MODEL: ${{ inputs.model }}
+        RAW_PROVIDERS: ${{ inputs.providers }}
+        HAS_CLAUDE_OAUTH: ${{ inputs.claude-oauth-token != '' }}
+        HAS_ANTHROPIC_KEY: ${{ inputs.anthropic-api-key != '' }}
+        HAS_GEMINI_KEY: ${{ inputs.gemini-api-key != '' }}
+        CLAUDE_MODEL: ${{ inputs.claude-model }}
+        GEMINI_MODEL: ${{ inputs.gemini-model }}
         EFFORT: ${{ inputs.effort }}
+        CLAUDE_EFFORT: ${{ inputs.claude-effort }}
+        GEMINI_EFFORT: ${{ inputs.gemini-effort }}
+        ALLOW_CUSTOM_EFFORT: ${{ inputs.allow-custom-effort }}
+        GEMINI_CLI_VERSION: ${{ inputs.gemini-cli-version }}
         MAX_FINDINGS: ${{ inputs.max-findings }}
+        FIX: ${{ inputs.fix }}
+        COST: ${{ inputs.cost }}
+        SHOW_MICRO_COSTS: ${{ inputs.show-micro-costs }}
+        HAS_GITHUB_TOKEN: ${{ inputs.github-token != '' }}
         BOT_LOGIN: ${{ inputs.bot-login }}
         BOT_ID: ${{ inputs.bot-id }}
-        HAS_GITHUB_TOKEN: ${{ inputs.github-token != '' }}
+        MEMORY_REPO: ${{ inputs.memory-repository }}
+        HAS_MEMORY_KEY: ${{ inputs.memory-ssh-key != '' }}
+        MEMORY_FILES: ${{ inputs.memory-files }}
       run: |
         errors=0
         error() {
           echo "::error::$*"
           errors=$((errors + 1))
         }
-        if [ "$HAS_OAUTH_TOKEN" = "$HAS_API_KEY" ]; then
-          error "Set exactly one of oauth-token and anthropic-api-key."
+
+        run_claude=false
+        run_gemini=false
+        canonical=()
+        IFS=',' read -r -a raw_list <<< "$RAW_PROVIDERS"
+        for item in "${raw_list[@]}"; do
+          p=$(tr '[:upper:]' '[:lower:]' <<< "$item" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+          [ -n "$p" ] || continue
+          case "$p" in
+            claude)
+              if [ "$run_claude" = false ]; then
+                run_claude=true
+                canonical+=(claude)
+              fi
+              ;;
+            gemini | antigravity)
+              if [ "$run_gemini" = false ]; then
+                run_gemini=true
+                canonical+=(gemini)
+              fi
+              ;;
+            *)
+              error "Unknown provider '$p': supported providers are 'claude' and 'gemini' (alias: 'antigravity')."
+              ;;
+          esac
+        done
+        if [ "${#canonical[@]}" -eq 0 ]; then
+          error "providers must list at least one provider ('claude', 'gemini', or 'claude,gemini')."
         fi
-        [[ "$MODEL" =~ ^[A-Za-z0-9._:-]+(\[[0-9a-z]+\])?$ ]] || error "model '$MODEL' isn't a model alias or id."
-        case "$EFFORT" in
-          low | medium | high | xhigh | max) ;;
-          *) error "effort '$EFFORT' isn't one of low, medium, high, xhigh and max." ;;
+        providers_csv=$(IFS=','; echo "${canonical[*]}")
+
+        if [ "$run_claude" = true ]; then
+          if [ "$HAS_CLAUDE_OAUTH" = "$HAS_ANTHROPIC_KEY" ]; then
+            error "When claude is enabled, set exactly one of claude-oauth-token and anthropic-api-key."
+          fi
+        fi
+        if [ "$run_gemini" = true ] && [ "$HAS_GEMINI_KEY" != true ]; then
+          error "When gemini is enabled, gemini-api-key is required."
+        fi
+
+        claude_model=${CLAUDE_MODEL:-opus}
+        [[ "$claude_model" =~ ^[A-Za-z0-9._:-]+(\[[0-9a-z]+\])?$ ]] || error "claude-model '$claude_model' isn't a valid model alias or id."
+
+        raw_gemini=${GEMINI_MODEL:-neon}
+        case "${raw_gemini,,}" in
+          neon) gemini_model="gemini-4-neon" ;;
+          carbon) gemini_model="gemini-4-carbon" ;;
+          argon) gemini_model="gemini-4-argon" ;;
+          hydrogen) gemini_model="gemini-4-hydrogen" ;;
+          *) gemini_model="$raw_gemini" ;;
         esac
+        [[ "$gemini_model" =~ ^[A-Za-z0-9._:/-]+$ ]] || error "gemini-model '$raw_gemini' isn't a valid model alias or id."
+        [[ "$GEMINI_CLI_VERSION" =~ ^[A-Za-z0-9._-]+$ ]] || error "gemini-cli-version '$GEMINI_CLI_VERSION' isn't a valid version."
+
+        for flag_name in fix cost show-micro-costs allow-custom-effort; do
+          case "$flag_name" in
+            fix) val=$FIX ;;
+            cost) val=$COST ;;
+            show-micro-costs) val=$SHOW_MICRO_COSTS ;;
+            allow-custom-effort) val=$ALLOW_CUSTOM_EFFORT ;;
+          esac
+          case "$val" in
+            true | false) ;;
+            *) error "$flag_name '$val' must be 'true' or 'false'." ;;
+          esac
+        done
+
+        check_effort() {
+          if ! [[ "$2" =~ ^[A-Za-z0-9-]+$ ]]; then
+            error "$1 '$2' isn't a valid effort level."
+            return
+          fi
+          case "$2" in
+            low | medium | high | xhigh | max) ;;
+            ultra)
+              error "$1 'ultra' is not allowed in CI (it triggers cloud multi-agent review)."
+              ;;
+            *)
+              if [ "$ALLOW_CUSTOM_EFFORT" = true ]; then
+                echo "::warning::$1 '$2' is not one of the standard levels (low, medium, high, xhigh, max); passing it through because allow-custom-effort is 'true'."
+              else
+                error "$1 '$2' isn't one of low, medium, high, xhigh and max (set allow-custom-effort: 'true' to pass a custom level)."
+              fi
+              ;;
+          esac
+        }
+        effort_norm=${EFFORT,,}
+        claude_effort=${CLAUDE_EFFORT:-$effort_norm}
+        claude_effort=${claude_effort,,}
+        gemini_effort=${GEMINI_EFFORT:-$effort_norm}
+        gemini_effort=${gemini_effort,,}
+        check_effort "effort" "$effort_norm"
+        check_effort "claude-effort" "$claude_effort"
+        check_effort "gemini-effort" "$gemini_effort"
+
         [[ "$MAX_FINDINGS" =~ ^(all|[1-9][0-9]*)$ ]] || error "max-findings '$MAX_FINDINGS' isn't 'all' or a number."
-        [[ "$BOT_LOGIN" =~ ^[A-Za-z0-9-]+\[bot\]$ ]] || error "bot-login '$BOT_LOGIN' isn't a bot user's login, such as claude[bot]."
-        [[ "$BOT_ID" =~ ^[0-9]+$ ]] || error "bot-id '$BOT_ID' isn't a user id."
-        if [ "$HAS_GITHUB_TOKEN" = true ] && [ "$BOT_LOGIN" = "claude[bot]" ]; then
-          echo "::warning::github-token is set but bot-login is still claude[bot]: set your App's bot user, or the review won't recognise its own earlier comments."
+
+        if [ "$HAS_GITHUB_TOKEN" = true ]; then
+          [ -n "$BOT_LOGIN" ] || error "bot-login is required when github-token is set."
+          [ -n "$BOT_ID" ] || error "bot-id is required when github-token is set."
+          bot_login=$BOT_LOGIN
+          bot_id=$BOT_ID
+        else
+          if [ "$run_claude" = true ]; then
+            bot_login=${BOT_LOGIN:-claude[bot]}
+            bot_id=${BOT_ID:-209825114}
+          else
+            bot_login=${BOT_LOGIN:-github-actions[bot]}
+            bot_id=${BOT_ID:-41898282}
+          fi
+          if [ "$FIX" = true ] && [ "$run_claude" = false ]; then
+            echo "::warning::fix is 'true' without github-token on a Gemini-only run: pushing with GITHUB_TOKEN requires 'permissions: contents: write' on the job, and pushed commits will not trigger pull request workflows. Pass a GitHub App token via github-token if you use the gate action."
+          fi
         fi
-        if [ "$RUNNER_OS" != Linux ] || ! command -v apt-get > /dev/null; then
-          error "The review runs on an Ubuntu runner only: its sandbox is installed with apt-get."
+        if [ -n "$bot_login" ]; then
+          [[ "$bot_login" =~ ^[A-Za-z0-9-]+\[bot\]$ ]] || error "bot-login '$bot_login' isn't a bot user's login, such as claude[bot] or github-actions[bot]."
         fi
+        if [ -n "$bot_id" ]; then
+          [[ "$bot_id" =~ ^[0-9]+$ ]] || error "bot-id '$bot_id' isn't a numeric user id."
+        fi
+
+        if [ -n "$MEMORY_REPO" ]; then
+          [ "$HAS_MEMORY_KEY" = true ] || error "memory-ssh-key is required when memory-repository is set."
+          [ -n "$MEMORY_FILES" ] || error "memory-files is required when memory-repository is set."
+        fi
+
+        if [ "$run_claude" = true ]; then
+          if [ "$RUNNER_OS" != Linux ] || ! command -v apt-get > /dev/null; then
+            error "Claude runs on an Ubuntu runner only: its sandbox is installed with apt-get."
+          fi
+        elif [ "$RUNNER_OS" != Linux ]; then
+          error "The review runs on a Linux runner only."
+        fi
+
         [ "$errors" -eq 0 ] || exit 1
 
-    # GitHub starts no pull_request workflow while the pull request conflicts with its base, so one
-    # opened (or marked ready) with a conflict gets no review on that event. A caller that also runs
-    # on synchronize gets it on the push that solves the conflict: on a push, the review runs only
-    # when the calling workflow has no run between the pull request's opening (or, for a draft, its
-    # last marking as ready) and this one, and never on the bot user's own fix commit. Runs a draft
-    # left before it was marked ready don't count, and neither does a push made seconds after this
-    # one. Every later push ends here, green, without reviewing. A failed read skips the review too,
-    # so a GitHub error never reviews every push.
+        {
+          echo "providers=$providers_csv"
+          echo "run-claude=$run_claude"
+          echo "run-gemini=$run_gemini"
+          echo "claude-model=$claude_model"
+          echo "claude-effort=$claude_effort"
+          echo "gemini-model=$gemini_model"
+          echo "gemini-effort=$gemini_effort"
+          echo "bot-login=$bot_login"
+          echo "bot-id=$bot_id"
+        } >> "$GITHUB_OUTPUT"
+
     - id: event
       shell: bash
       env:
@@ -140,7 +294,9 @@ runs:
         GH_REPO: ${{ github.repository }}
         EVENT_ACTION: ${{ github.event.action }}
         SENDER: ${{ github.event.sender.login }}
-        BOT_LOGIN: ${{ inputs.bot-login }}
+        ACTOR: ${{ github.actor }}
+        BOT_LOGIN: ${{ steps.config.outputs.bot-login }}
+        ALLOWED_BOTS: ${{ inputs.allowed-bots }}
         HEAD_REF: ${{ github.head_ref }}
         OPENED_AT: ${{ github.event.pull_request.created_at }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -149,12 +305,32 @@ runs:
           echo "review=$1" >> "$GITHUB_OUTPUT"
           exit 0
         }
+        # Skip bot-triggered runs unless explicitly allowlisted (matches claude-code-action: '*' allows all bots).
+        if [[ "$ACTOR" == *"[bot]" ]]; then
+          bot_name=${ACTOR%"[bot]"}
+          bot_name=${bot_name,,}
+          allowed=false
+          IFS=',' read -r -a bots <<< "$ALLOWED_BOTS"
+          for b in "${bots[@]}"; do
+            b=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<< "$b")
+            b=${b%"[bot]"}
+            b=${b,,}
+            if [ "$b" = "*" ] || { [ -n "$b" ] && [ "$b" = "$bot_name" ]; }; then
+              allowed=true
+              break
+            fi
+          done
+          if [ "$allowed" != true ]; then
+            echo "::notice::Bot actor '$ACTOR' is not listed in allowed-bots, so this run is skipped."
+            review false
+          fi
+        fi
+
         [ "$EVENT_ACTION" = synchronize ] || review true
         if [ "$SENDER" = "$BOT_LOGIN" ]; then
           echo "::notice::A push by $BOT_LOGIN, the review's own fix commit, isn't reviewed."
           review false
         fi
-        # A re-run keeps its run's creation time, so it still sees the same runs before it.
         if ! run=$(gh api "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID" --jq '"\(.workflow_id) \(.created_at)"') ||
           ! ready=$(gh api --paginate "repos/$GH_REPO/issues/$PR_NUMBER/timeline?per_page=100" \
             --jq '.[] | select(.event == "ready_for_review") | .created_at' | tail -n 1); then
@@ -175,10 +351,6 @@ runs:
         echo "::notice::No run of this workflow since the pull request opened, which GitHub skips while it conflicts with its base, so this push is reviewed."
         review true
 
-    # Agent memories live in a private repository when the reviewed one is public. Only the files
-    # memory-files names reach the runner: a memory that holds figures or ids a comment must never
-    # repeat stays out. Without the key, or when the checkout fails, the review still runs, only
-    # without them.
     - id: memory
       if: steps.event.outputs.review == 'true' && inputs.memory-repository != '' && inputs.memory-ssh-key != '' && inputs.memory-files != ''
       continue-on-error: true
@@ -192,9 +364,6 @@ runs:
         sparse-checkout: ${{ inputs.memory-files }}
         sparse-checkout-cone-mode: false
 
-    # Excluded from the pull request's checkout, so the review's searches over the repository skip it.
-    # The review's own recipe asks the model to quote the rule behind a conventions finding; for these
-    # private conventions it is told to paraphrase instead.
     - id: memory-instructions
       if: steps.event.outputs.review == 'true'
       shell: bash
@@ -204,10 +373,6 @@ runs:
         MEMORY_FILES: ${{ inputs.memory-files }}
       run: |
         [ -n "$MEMORY_REPOSITORY" ] || exit 0
-        if [ -z "$MEMORY_FILES" ]; then
-          echo "::warning::memory-repository is set without memory-files, so the review runs without the agent memories."
-          exit 0
-        fi
         if [ "$MEMORY_OUTCOME" != success ]; then
           echo "::warning::The agent memories weren't checked out, so the review runs without them."
           exit 0
@@ -216,7 +381,7 @@ runs:
         {
           echo "text<<MEMORY_INSTRUCTIONS_END"
           echo "The maintainer's conventions for this repository are in .agent-memory/$MEMORY_FILES,"
-          echo "one per file: read them all and treat them with the same weight as CLAUDE.md."
+          echo "one per file: read them all and treat them with the same weight as AGENTS.md, CLAUDE.md, and GEMINI.md."
           echo "They are private and this repository may be public: cite a convention in your own words,"
           echo "never quote a file or name its path in a finding, even where the review's recipe"
           echo "asks you to quote the rule. .agent-memory is not part of the pull request: never"
@@ -224,15 +389,6 @@ runs:
           echo "MEMORY_INSTRUCTIONS_END"
         } >> "$GITHUB_OUTPUT"
 
-    # The review can't read the earlier reviews on the pull request, so the findings they left (a
-    # draft marked ready a second time, a review on request after new pushes) are handed to it, for it
-    # not to raise the same issues again: the inline comments, and the bodies of the reviews that
-    # listed findings GitHub couldn't anchor to a line.
-    # The list is a help, not a condition: a GitHub error here only leaves it short. gh runs its --jq
-    # filters with gojq, whose regexes (RE2) have no lookahead, so the numbered findings of a review
-    # body are grouped paragraph by paragraph instead; only a paragraph in post-review.sh's own form
-    # ("1. `path:line`" or "1. (no file)") starts a finding, a numbered list inside one doesn't, and
-    # neither does one inside a code block (a suggestion), which may hold blank lines.
     - id: earlier
       if: steps.event.outputs.review == 'true'
       shell: bash
@@ -240,7 +396,7 @@ runs:
         GH_TOKEN: ${{ github.token }}
         GH_REPO: ${{ github.repository }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
-        BOT_LOGIN: ${{ inputs.bot-login }}
+        BOT_LOGIN: ${{ steps.config.outputs.bot-login }}
       run: |
         comments=$(
           gh api --paginate "repos/$GH_REPO/pulls/$PR_NUMBER/comments" \
@@ -249,11 +405,12 @@ runs:
             || echo "::warning::The earlier inline comments couldn't be read, so the review isn't told about them." >&2
           gh api --paginate "repos/$GH_REPO/pulls/$PR_NUMBER/reviews" \
             --jq '.[] | select(.user.login == "github-actions[bot]" or .user.login == env.BOT_LOGIN)
-              | .body | select(test("^### Code review\\s+[0-9]+ finding"))
-              | gsub("\\s*<!-- claude-review run [^>]*-->"; "")
+              | .body | select(test("^### Code review"))
+              | gsub("\\s*<!-- (?:ai|claude)-review run [^>]*-->"; "")
               | split("\n\n")[1:]
               | reduce .[] as $paragraph ({items: [], fenced: false};
-                  (if (.fenced | not) and ($paragraph | test("^[0-9]+\\. (`|\\(no file\\))")) then .items += [$paragraph]
+                  (if (.fenced | not) and ($paragraph | test("^> ⚠️")) then .
+                    elif (.fenced | not) and ($paragraph | test("^[0-9]+\\. (`|\\(no file\\))")) then .items += [$paragraph]
                     elif (.items | length) > 0 then .items[-1] += " " + $paragraph else . end)
                   | .fenced = (.fenced != ([$paragraph | scan("(?m)^\\s*```")] | length % 2 == 1)))
               | .items[] | "- " + (gsub("\\s+"; " ") | .[0:300])' \
@@ -262,21 +419,13 @@ runs:
         {
           echo "text<<EARLIER_COMMENTS_END"
           if [ -n "$comments" ]; then
-            echo "Claude reviewed this pull request before and left these comments. Don't report an"
+            echo "An AI reviewer reviewed this pull request before and left these comments. Don't report an"
             echo "issue one of them already raised:"
             echo "$comments"
           fi
           echo "EARLIER_COMMENTS_END"
         } >> "$GITHUB_OUTPUT"
 
-    # The hook and the scripts it runs live outside the checkout for the session, in a directory made
-    # read-only, since the hook runs with the App's token. The session can't write there anyway (its
-    # Edit rule covers the checkout only, and none of its Bash commands writes a file); the read-only
-    # copy and the checks on the markers (stop-hook.sh) keep that true if a later change lets it. The
-    # hook's markers go to a state directory of their own. When the review started, for the posting
-    # step to tell a review the hook posted from one it didn't, and whether the hook commits the fixes
-    # reach the hook as arguments rather than files. The Bash guard (bash-guard.sh) is the session's
-    # PreToolUse hook, copied with them.
     - id: tools
       if: steps.event.outputs.review == 'true'
       shell: bash
@@ -286,45 +435,33 @@ runs:
         PR_NUMBER: ${{ github.event.pull_request.number }}
         FIX: ${{ inputs.fix }}
       run: |
-        dir="$RUNNER_TEMP/claude-review"
-        state="$RUNNER_TEMP/claude-review-state"
-        # A run before this one in the same job left its copy read-only, and its markers and logs.
+        dir="$RUNNER_TEMP/ai-review"
+        state="$RUNNER_TEMP/ai-review-state"
         if [ -d "$dir" ]; then
           chmod -R u+w "$dir"
           rm -rf "$dir"
         fi
         rm -rf "$state"
         mkdir -p "$dir" "$state"
-        cp "$GITHUB_ACTION_PATH"/{stop-hook.sh,post-review.sh,extract-findings.py,commit-fixes.sh,bash-guard.sh} "$dir/"
+        cp "$GITHUB_ACTION_PATH"/{stop-hook.sh,post-review.sh,post-cost.sh,extract-findings.py,merge-findings.py,pricing.py,summarize-cost.py,commit-fixes.sh,bash-guard.sh,gemini-guard.sh,gemini-run.sh,gemini-prompt.md} "$dir/"
+        chmod +x "$dir"/*.sh
         chmod -R a-w "$dir"
-        # A symlink the pull request adds could point the session's Read allow rule for the checkout at
-        # /proc, $RUNNER_TEMP or the checkout's .git, or its Edit allow rule at .github or .claude, if a
-        # deny rule checks the link's path rather than its target. One that leaves the checkout or
-        # enters one of those is removed for the review; commit-fixes.sh restores it before committing.
-        # The checkout's own path is resolved first, in case the workspace sits behind a symlink.
+
+        # Remove symlinks leaving the checkout or entering .git, .github, .claude, or .gemini.
         root=$(realpath "$PWD")
         while IFS= read -r -d '' link; do
           case "$(realpath -m "$link")" in
             "$root"/.git | "$root"/.git/* | "$root"/.github | "$root"/.github/*) ;;
-            "$root"/.claude | "$root"/.claude/*) ;;
+            "$root"/.claude | "$root"/.claude/* | "$root"/.gemini | "$root"/.gemini/*) ;;
             "$root"/*) continue ;;
           esac
           rm -f "$link"
-          # The path is the pull request's to pick: escaped, a newline in it can't start a workflow
-          # command of its own.
           shown=${link//'%'/%25}
           shown=${shown//$'\r'/%0D}
           shown=${shown//$'\n'/%0A}
-          echo "::notice::$shown points outside the checkout or into .git, .github or .claude, so the review doesn't see it."
+          echo "::notice::$shown points outside the checkout or into .git, .github, .claude or .gemini, so the review doesn't see it."
         done < <(find . -path ./.git -prune -o -type l -print0)
-        # With fix, the reviewed commit's version of each file the pull request changes, for the
-        # suggestions: the working tree then holds the review's own changes, and git show, which would
-        # read the commit, isn't allowed (see the claude step). Without fix, the checkout is that
-        # commit. The copy is cleared first, since it lives outside $RUNNER_TEMP (which the session
-        # can't read: checkout keeps its credentials there) and a reused runner would keep the last
-        # one. The files come from the API, which lists up to 3,000 of them whatever the diff's size; a
-        # file the pull request deletes has no version to copy, and without the list suggestions are
-        # only left out.
+
         reviewed="$PWD"
         if [ "$FIX" = true ]; then
           reviewed="$(dirname "$RUNNER_TEMP")/reviewed-head"
@@ -351,19 +488,39 @@ runs:
           echo "started=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         } >> "$GITHUB_OUTPUT"
 
-    # What changes with fix: the skill's --fix flag, the task, the outcome of each finding, and the
-    # model's file tools: Edit is allowed inside the checkout only (and in --tools), never under .git,
-    # .github, .claude (settings and hooks the session could pick up) or .agent-memory; Write stays
-    # denied, since the commit only takes files the branch already tracks. Edit rules cover every tool
-    # that edits a file; the deny rules win over the allow rule.
+    # Gemini runs before Claude when both are enabled, so Claude's Stop hook can merge both sets of
+    # findings and post/push once while the Claude GitHub App OIDC token is active.
+    - id: gemini
+      name: Run Gemini review
+      if: steps.event.outputs.review == 'true' && steps.config.outputs.run-gemini == 'true'
+      continue-on-error: ${{ steps.config.outputs.run-claude == 'true' }}
+      shell: bash
+      env:
+        GEMINI_API_KEY: ${{ inputs.gemini-api-key }}
+        GH_TOKEN: ${{ inputs.github-token || github.token }}
+        STATE: ${{ steps.tools.outputs.state }}
+        REVIEWED_DIR: ${{ steps.tools.outputs.reviewed }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        FIX: ${{ inputs.fix }}
+        GEMINI_MODEL: ${{ steps.config.outputs.gemini-model }}
+        GEMINI_EFFORT: ${{ steps.config.outputs.gemini-effort }}
+        GEMINI_CLI_VERSION: ${{ inputs.gemini-cli-version }}
+        MAX_FINDINGS: ${{ inputs.max-findings }}
+        MEMORY_INSTRUCTIONS: ${{ steps.memory-instructions.outputs.text }}
+        EARLIER_COMMENTS: ${{ steps.earlier.outputs.text }}
+        EXTRA_INSTRUCTIONS: ${{ inputs.instructions }}
+      run: '"${{ steps.tools.outputs.dir }}/gemini-run.sh"'
+
     - id: mode
-      if: steps.event.outputs.review == 'true'
+      if: steps.event.outputs.review == 'true' && steps.config.outputs.run-claude == 'true'
       shell: bash
       env:
         FIX: ${{ inputs.fix }}
+        RUN_GEMINI: ${{ steps.config.outputs.run-gemini }}
+        REVIEWED_DIR: ${{ steps.tools.outputs.reviewed }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         WORKSPACE: ${{ github.workspace }}
-        EFFORT: ${{ inputs.effort }}
+        EFFORT: ${{ steps.config.outputs.claude-effort }}
         MAX_FINDINGS: ${{ inputs.max-findings }}
       run: |
         if [ "$FIX" = true ]; then
@@ -371,13 +528,21 @@ runs:
             echo "arguments=$EFFORT $PR_NUMBER --fix --max-findings $MAX_FINDINGS"
             echo "tools=Task,Bash,Read,Edit,Grep,Glob,Skill"
             echo "allowed=,Edit(/$WORKSPACE/**)"
-            echo "denied=Write,NotebookEdit,Edit(/$WORKSPACE/.git/**),Edit(/$WORKSPACE/.github/**),Edit(/$WORKSPACE/.claude/**),Edit(/$WORKSPACE/.agent-memory/**),"
+            echo "denied=Write,NotebookEdit,Edit(/$WORKSPACE/.git/**),Edit(/$WORKSPACE/.github/**),Edit(/$WORKSPACE/.claude/**),Edit(/$WORKSPACE/.gemini/**),Edit(/$WORKSPACE/.agent-memory/**),"
             echo "task<<TASK_END"
-            echo "and let it apply its findings to the working tree, which is the pull request's head"
-            echo "commit. Apply a fix only when it is clear and stays within what the finding describes,"
+            if [ "$RUN_GEMINI" = true ]; then
+              echo "and let it apply its findings to the working tree. Note that Gemini already ran and"
+              echo "may have applied its own fixes to the working tree: don't revert Gemini's fixes,"
+              echo "don't report issues inside them as author bugs, and always verify line numbers and"
+              echo "pre-fix code against $REVIEWED_DIR/<file> (the untouched reviewed head commit)."
+            else
+              echo "and let it apply its findings to the working tree, which is the pull request's head"
+              echo "commit."
+            fi
+            echo "Apply a fix only when it is clear and stays within what the finding describes,"
             echo "editing files that already exist; leave a finding that needs the author's call (a design"
             echo "choice, a product behaviour, a fix that needs a new file) as it is. Never edit anything"
-            echo "under .git, .github, .claude or .agent-memory, and don't commit or push: a later step"
+            echo "under .git, .github, .claude, .gemini or .agent-memory, and don't commit or push: a later step"
             echo "commits the working tree to the pull request's branch."
             echo "TASK_END"
             echo "outcome<<OUTCOME_END"
@@ -400,70 +565,26 @@ runs:
           } >> "$GITHUB_OUTPUT"
         fi
 
-    # The same review as a local /code-review before the pull request opens: the skill bundled with
-    # Claude Code, at the effort and on the model the caller picks (high, on Opus, by default). The
-    # model invokes the skill itself, with the level, the pull request number, --max-findings and,
-    # with fix, --fix as its only arguments: put on the skill's command line, the instructions below
-    # would become part of its target. Without --max-findings, the skill keeps only the ten most
-    # severe findings, so a large pull request needed a review on request after every round of fixes
-    # to see the rest (one took 27): the default is all of them.
-    #
-    # bot_name and bot_id make the fix commit's author the bot user the review posts as: without
-    # bot_id, the action's default is github-actions[bot]'s id, and GitHub linked the commit to it.
-    #
-    # The skill's findings carry no severity and no fix, so the model adds both after it returns: the
-    # severity labels each comment, and a fix that only replaces the commented lines becomes a GitHub
-    # suggestion the author can commit from the pull request (post-review.sh). The suggestion is read
-    # from the reviewed commit, since with fix the working tree holds the review's own changes.
-    #
-    # Without a tool to report through, the skill returns its findings as a JSON array, which is what
-    # the Stop hook (settings) and the posting step read from Claude's last message. The hook gets the
-    # pull request number and the reviewed commits from the runner's environment, and has time for the
-    # script's retries, so it isn't killed between a post and its marker.
-    #
-    # The session can only read through the Read, Grep and Glob tools, and only the checkout and the
-    # reviewed commit's copy: a path no allow rule names is denied, since nobody is there to approve
-    # it, and Read rules cover Grep and Glob too. The deny rules repeat it for what must never be
-    # read: the runner's environment (/proc), $RUNNER_TEMP (checkout's credentials, the hook's state),
-    # /etc, /tmp, the checkout's .git and the home's files that hold credentials. Claude Code's own
-    # folder for the session (~/.claude/projects) stays readable: a Bash output too long to show,
-    # such as a large gh pr diff, is saved there.
-    #
-    # A Bash command that reads or writes a file of its choosing would get around them: cat, grep,
-    # jq, git diff --no-index and git blame --contents read any file, and git diff, log and show write
-    # one with --output, which once let a prompt injection rewrite the Stop hook. So the only Bash
-    # commands allowed are gh's read-only ones, which take the diff from GitHub (gh pr diff), and git
-    # commands that print neither a file nor their arguments. The allowlist only matches a command's
-    # start, and Claude Code runs some read-only commands without asking, so the Bash guard
-    # (bash-guard.sh) decides before every Bash call: one plain line of a few known commands, with no
-    # quoting, expansion, pipe or redirection, and none of gh's --jq, -q, --template or -t, which read
-    # the environment. On top of that, CLAUDE_CODE_SUBPROCESS_ENV_SCRUB keeps the Claude OAuth token
-    # out of every Bash command's and hook's environment; the GitHub token gh needs stays. A command
-    # the review was denied, or the guard refused, shows as a warning on the run (last step): allow it
-    # only when it can neither read nor write a file it is given, nor print the environment, and then
-    # in the four places that list the commands together: --allowedTools, bash-guard.sh, the prompt
-    # and docs/security-model.md.
-    #
-    # Claude Code's native Linux build has no Grep or Glob tool unless --tools names them, and its
-    # Bash grep and find are refused here, so --tools lists every tool the review uses (the mode
-    # step's list, with Edit only with fix): without it the review couldn't search the checkout at
-    # all. A tool the review needs and doesn't have goes there too.
-    #
-    # Some of the skill's recipes start review agents in the background, and the action ends the
-    # session at the first result Claude reports, before any agent has finished: the run ended green
-    # without posting anything (anthropics/claude-code-action#1646). Background tasks are turned off
-    # so the agents run in the foreground, and the tools for waiting on them are blocked.
-    #
-    # CLAUDE_CODE_SUBPROCESS_ENV_SCRUB runs every Bash command in Claude Code's sandbox, which on Linux
-    # needs bubblewrap and socat. The runner has neither, and without them every Bash call failed, so
-    # the review had no diff. Ubuntu's AppArmor also keeps an unprivileged user from creating the user
-    # namespace bubblewrap needs; the runner is a throwaway VM, so that restriction is lifted here.
-    # The step warns when the sandbox still can't start, so a run that reviews without Bash shows it.
+    # Security rationale for the Claude session:
+    # - A Bash command that reads or writes an arbitrary file would bypass Read/Edit rules: cat, grep,
+    #   jq, git diff --no-index and git blame --contents read any file, and git diff, log and show
+    #   write one with --output (which once let a prompt injection rewrite the Stop hook). So only
+    #   gh's read-only commands and safe git status/branch are allowed, enforced by bash-guard.sh.
+    #   Keep the command allowlist in sync across --allowedTools, bash-guard.sh, gemini-guard.sh /
+    #   gemini-run.sh, the prompt, and docs/security-model.md.
+    # - Claude Code's native Linux build has no Grep or Glob tool unless --tools names them, and Bash
+    #   grep/find are refused, so --tools must list every tool the review uses (with Edit only when
+    #   fix is true).
+    # - Some /code-review recipes spawn background review agents, and claude-code-action ends the
+    #   session at the first result before background agents finish (anthropics/claude-code-action#1646).
+    #   CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 forces agents to run in the foreground, and
+    #   ScheduleWakeup/Monitor/SendMessage are disallowed.
+    # - CLAUDE_CODE_SUBPROCESS_ENV_SCRUB runs every Bash command in bubblewrap + socat; Ubuntu's
+    #   AppArmor userns restriction is lifted on the throwaway runner VM so the sandbox can start.
     - name: Install the sandbox's dependencies
-      if: steps.event.outputs.review == 'true'
+      if: steps.event.outputs.review == 'true' && steps.config.outputs.run-claude == 'true'
       shell: bash
       run: |
-        # The package index is only refreshed when the image's own is too old to install them.
         install_sandbox() { sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bubblewrap socat > /dev/null; }
         if ! command -v bwrap > /dev/null || ! command -v socat > /dev/null; then
           install_sandbox || { sudo apt-get update -qq && install_sandbox; } || true
@@ -475,21 +596,28 @@ runs:
           echo "::warning::bubblewrap can't start a sandbox on this runner, so the review's Bash commands will fail."
         fi
 
+    - id: claude-start
+      if: steps.event.outputs.review == 'true' && steps.config.outputs.run-claude == 'true'
+      shell: bash
+      run: echo "ts=$(date +%s)" >> "$GITHUB_OUTPUT"
+
     - id: claude
-      if: steps.event.outputs.review == 'true'
+      if: steps.event.outputs.review == 'true' && steps.config.outputs.run-claude == 'true'
       # An exact release: v1 moves, and would change what a pinned release of this action does.
       uses: anthropics/claude-code-action@4845bacbb38b3c4b15d948f035349786f678e068 # v1.0.267
+      continue-on-error: ${{ steps.config.outputs.run-gemini == 'true' }}
       env:
         CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1"
         CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
-        # For the Stop hook's post-review.sh.
-        BOT_LOGIN: ${{ inputs.bot-login }}
+        BOT_LOGIN: ${{ steps.config.outputs.bot-login }}
+        BOT_ID: ${{ steps.config.outputs.bot-id }}
+        PROVIDERS: ${{ steps.config.outputs.providers }}
       with:
-        claude_code_oauth_token: ${{ inputs.oauth-token }}
+        claude_code_oauth_token: ${{ inputs.claude-oauth-token }}
         anthropic_api_key: ${{ inputs.anthropic-api-key }}
         github_token: ${{ inputs.github-token }}
-        bot_name: ${{ inputs.bot-login }}
-        bot_id: ${{ inputs.bot-id }}
+        bot_name: ${{ steps.config.outputs.bot-login }}
+        bot_id: ${{ steps.config.outputs.bot-id }}
         allowed_bots: ${{ inputs.allowed-bots }}
         settings: |
           {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "${{ steps.tools.outputs.dir }}/bash-guard.sh ${{ steps.tools.outputs.state }}"}]}], "Stop": [{"hooks": [{"type": "command", "command": "${{ steps.tools.outputs.dir }}/stop-hook.sh ${{ steps.tools.outputs.state }} ${{ steps.tools.outputs.started }} ${{ inputs.fix }}", "timeout": 600}]}]}}
@@ -510,8 +638,8 @@ runs:
             - "must-fix": the change shouldn't merge with it: a bug users would hit (a crash, wrong
               data, data loss, a broken flow), a security hole, a race that corrupts state.
             - "should-fix": a real problem worth fixing in this pull request, with a limited impact:
-              an edge case, error handling that degrades the experience, a CLAUDE.md or maintainer
-              convention the change breaks, a cleanup that clearly pays off.
+              an edge case, error handling that degrades the experience, an AGENTS.md, CLAUDE.md,
+              GEMINI.md or maintainer convention the change breaks, a cleanup that clearly pays off.
             - "nitpick": optional: naming, wording, a small simplification, style the tooling
               doesn't enforce.
           - "fix": one or two sentences on how to fix it, written for the author. Markdown is fine,
@@ -528,37 +656,47 @@ runs:
           read files with the Read, Grep and Glob tools. Bash only runs gh pr view/diff/list, gh issue
           view/list, gh search, git status and git branch --show-current, each as one plain line: no
           quotes, pipes, redirections or shell variables, and no --jq, --template, -q or -t.
-          A search runs without quotes. A symlink that leaves the checkout or enters .git, .github or
-          .claude was removed before the review, so git status shows it as deleted: that isn't part of
-          the change.
+          A search runs without quotes. A symlink that leaves the checkout or enters .git, .github,
+          .claude or .gemini was removed before the review, so git status shows it as deleted: that
+          isn't part of the change.
 
           ${{ steps.memory-instructions.outputs.text }}
           ${{ steps.earlier.outputs.text }}
           ${{ inputs.instructions }}
         claude_args: >-
-          --model ${{ inputs.model }}
+          --model ${{ steps.config.outputs.claude-model }}
           --tools "${{ steps.mode.outputs.tools }}"
           --allowedTools "Skill(code-review),Read(/${{ github.workspace }}/**),Read(/${{ steps.tools.outputs.reviewed }}/**),Read(~/.claude/projects/**),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr list:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh search:*),Bash(git status:*),Bash(git branch --show-current)${{ steps.mode.outputs.allowed }}"
           --disallowedTools "${{ steps.mode.outputs.denied }}Read(//proc/**),Read(//sys/**),Read(//etc/**),Read(/${{ runner.temp }}/**),Read(//tmp/**),Read(/${{ github.workspace }}/.git/**),Read(~/.ssh/**),Read(~/.gnupg/**),Read(~/.config/**),Read(~/.docker/**),Read(~/.gradle/**),Read(~/.m2/**),Read(~/.git-credentials),Read(~/.gitconfig),Read(~/.netrc),Read(~/.npmrc),Read(~/.claude.json),Read(~/.claude/.credentials.json),Read(~/actions-runner/**),Read(~/runners/**),ScheduleWakeup,Monitor,SendMessage"
 
-    # The Stop hook leaves a log of what it saw. A review this action posted since the review started
-    # counts as posted by it, on whatever commit it landed. Its .posted marker (outside the checkout,
-    # where the session can't write) counts when GitHub can't be read, or doesn't list the review yet
-    # after a few tries, since the list can lag behind a review just posted. Otherwise the
-    # findings of Claude's last message (extract-findings.py reads the ```json fence) are posted here,
-    # with the workflow's token, and a notice when there is no findings list (a refusal, a skill that
-    # stopped early, a session that never ran: an expired token), so the pull request shows the run.
-    # The one case with no notice is the job's timeout: GitHub cancels the job, and no step runs after
-    # that; the failed check is the signal. A cancelled run (a newer run of the same pull request took
-    # its place, or someone stopped it) posts nothing either. Only the hook commits fixes, while the
-    # App's token is valid: when it pushed some and then didn't post, the review here still lists them
-    # as fixed by that commit (post-review.sh checks the commit the .pushed marker names); otherwise
-    # every finding is an inline comment.
-    - name: Post the findings when the hook didn't
+    - id: claude-end
+      if: ${{ !cancelled() && steps.claude-start.outputs.ts != '' }}
+      shell: bash
+      env:
+        START_TS: ${{ steps.claude-start.outputs.ts }}
+        STATE: ${{ steps.tools.outputs.state }}
+        CLAUDE_MODEL: ${{ steps.config.outputs.claude-model }}
+        CLAUDE_EFFORT: ${{ steps.config.outputs.claude-effort }}
+      run: |
+        end_ts=$(date +%s)
+        duration=$((end_ts - START_TS))
+        [ "$duration" -ge 0 ] || duration=0
+        jq -cn \
+          --arg model "$CLAUDE_MODEL" \
+          --arg effort "$CLAUDE_EFFORT" \
+          --argjson duration "$duration" \
+          '{provider: "claude", model: $model, effort: $effort, duration_seconds: $duration}' \
+          > "$STATE/claude-meta.json"
+        echo "Claude review finished in ${duration}s"
+
+    - name: Post the findings
       if: ${{ !cancelled() && steps.tools.outputs.dir != '' }}
       shell: bash
       env:
-        GH_TOKEN: ${{ github.token }}
+        GH_TOKEN: ${{ inputs.github-token || github.token }}
+        FIX_PUSH_TOKEN: ${{ inputs.github-token || github.token }}
+        HAS_GITHUB_TOKEN: ${{ inputs.github-token != '' }}
+        CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -567,71 +705,162 @@ runs:
         TOOLS: ${{ steps.tools.outputs.dir }}
         STATE: ${{ steps.tools.outputs.state }}
         STARTED: ${{ steps.tools.outputs.started }}
-        BOT_LOGIN: ${{ inputs.bot-login }}
+        BOT_LOGIN: ${{ steps.config.outputs.bot-login }}
+        BOT_ID: ${{ steps.config.outputs.bot-id }}
+        PROVIDERS: ${{ steps.config.outputs.providers }}
+        RUN_CLAUDE: ${{ steps.config.outputs.run-claude }}
+        RUN_GEMINI: ${{ steps.config.outputs.run-gemini }}
+        FIX: ${{ inputs.fix }}
       run: |
-        # The log quotes what the hook found, so it is printed through the same mask as the review.
-        if [ -f "$STATE/.hook-log" ]; then
-          "$TOOLS/post-review.sh" --redact < "$STATE/.hook-log" || echo "::warning::The Stop hook's log couldn't be printed."
-        else
-          echo "The Stop hook left no log: it didn't run."
+        if [ "$RUN_CLAUDE" = true ]; then
+          if [ -f "$STATE/.hook-log" ]; then
+            "$TOOLS/post-review.sh" --redact < "$STATE/.hook-log" || echo "::warning::The Stop hook's log couldn't be printed."
+          else
+            echo "The Stop hook left no log: it didn't run."
+          fi
+          for attempt in 1 2 3 4; do
+            if posted=$("$TOOLS/post-review.sh" --already "$PR_NUMBER"); then
+              echo "The review was posted from the session: $posted"
+              exit 0
+            elif [ $? -eq 2 ] && [ -f "$STATE/.posted" ]; then
+              echo "::warning::GitHub's reviews couldn't be read, so the hook's marker is trusted and nothing more is posted."
+              exit 0
+            fi
+            [ -f "$STATE/.posted" ] || break
+            if [ "$attempt" -eq 4 ]; then
+              echo "::warning::GitHub doesn't list the review the Stop hook posted yet, so its marker is trusted and nothing more is posted."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::warning::The Claude Stop hook didn't post the review, so the posting step takes over."
         fi
-        # GitHub's list of reviews can lag behind a review just posted, so with the hook's marker in
-        # place the lookup is tried a few more times, and then the marker is trusted.
-        for attempt in 1 2 3 4; do
-          if posted=$("$TOOLS/post-review.sh" --already "$PR_NUMBER"); then
-            echo "The review was posted from the session: $posted"
-            exit 0
-          elif [ $? -eq 2 ] && [ -f "$STATE/.posted" ]; then
-            echo "::warning::GitHub's reviews couldn't be read, so the hook's marker is trusted and nothing more is posted."
-            exit 0
+
+        if [ "$RUN_CLAUDE" = true ] && [ ! -f "$STATE/claude-findings.json" ] && [ -n "$EXECUTION_FILE" ] && [ -f "$EXECUTION_FILE" ]; then
+          claude_raw=$(jq -r '[.[] | select(.type == "result")] | last | .result // ""' "$EXECUTION_FILE" |
+            python3 "$TOOLS/extract-findings.py" || true)
+          if [ -n "$claude_raw" ]; then
+            jq -c 'map(if type == "object" then . + {provider: "claude"} else . end)' <<< "$claude_raw" \
+              > "$STATE/claude-findings.json"
           fi
-          [ -f "$STATE/.posted" ] || break
-          if [ "$attempt" -eq 4 ]; then
-            echo "::warning::GitHub doesn't list the review the Stop hook posted yet, so its marker is trusted and nothing more is posted."
-            exit 0
+        fi
+
+        merge_args=()
+        warnings=()
+        if [ "$RUN_GEMINI" = true ]; then
+          if [ -f "$STATE/gemini-findings.json" ]; then
+            merge_args+=("gemini:$STATE/gemini-findings.json")
+          else
+            warnings+=("Gemini ended without a findings list.")
           fi
-          sleep 10
-        done
-        echo "::warning::The session's Stop hook didn't post the review, so the findings were posted with the workflow's token."
+        fi
+        if [ "$RUN_CLAUDE" = true ]; then
+          if [ -f "$STATE/claude-findings.json" ]; then
+            merge_args+=("claude:$STATE/claude-findings.json")
+          else
+            warnings+=("Claude ended without a findings list.")
+          fi
+        fi
+
+        provider_warnings=""
+        if [ "${#warnings[@]}" -gt 0 ]; then
+          provider_warnings=$(IFS=' '; echo "${warnings[*]}")
+        fi
+
+        if [ "${#merge_args[@]}" -eq 0 ]; then
+          PROVIDER_WARNINGS="$provider_warnings" "$TOOLS/post-review.sh" "$PR_NUMBER" < /dev/null
+          exit 0
+        fi
+
+        # If Claude ran in fix mode and failed or left no findings list, drop unconfirmed Claude
+        # edits before merging so reverted findings are never reported as "fixed".
+        claude_reverted=false
+        if [ "$FIX" = true ] && [ ! -f "$STATE/.pushed" ] && [ "$RUN_CLAUDE" = true ] && { [ "$CLAUDE_OUTCOME" != success ] || [ ! -f "$STATE/claude-findings.json" ]; }; then
+          if [ -n "$(git diff --diff-filter=M --name-only 2> /dev/null)" ]; then
+            git -c core.hooksPath=/dev/null -c core.fsmonitor=false \
+              diff --diff-filter=M --name-only -z |
+              git -c core.hooksPath=/dev/null -c core.fsmonitor=false \
+                checkout --pathspec-from-file=- --pathspec-file-nul 2> /dev/null || true
+          fi
+          if [ -s "$STATE/gemini-fixes.patch" ]; then
+            git -c core.hooksPath=/dev/null -c core.fsmonitor=false \
+              apply "$STATE/gemini-fixes.patch" 2> /dev/null || true
+          fi
+          if [ -f "$STATE/claude-findings.json" ]; then
+            jq -c 'map(if type == "object" and .outcome == "fixed" then .outcome = "skipped" else . end)' \
+              "$STATE/claude-findings.json" > "$STATE/claude-findings.json.tmp" &&
+              mv "$STATE/claude-findings.json.tmp" "$STATE/claude-findings.json"
+          fi
+          claude_reverted=true
+        fi
+
+        findings=$(python3 "$TOOLS/merge-findings.py" "${merge_args[@]}")
+        if [ -z "$findings" ]; then
+          PROVIDER_WARNINGS="$provider_warnings" "$TOOLS/post-review.sh" "$PR_NUMBER" < /dev/null
+          exit 0
+        fi
+
+        # Only push fixes from the fallback step when Claude didn't own the App OIDC token
+        # (i.e. Gemini-only runs or runs with an explicit custom github-token). Otherwise a
+        # GITHUB_TOKEN push would skip downstream check workflows on the fix commit.
+        if [ "$FIX" = true ] && [ ! -f "$STATE/.pushed" ]; then
+          if [ "$RUN_CLAUDE" != true ] || [ "$HAS_GITHUB_TOKEN" = true ]; then
+            if [ "$claude_reverted" = true ]; then
+              echo "::notice::Reverted unconfirmed Claude edits and restored confirmed Gemini patch before committing."
+            fi
+            if sha=$("$TOOLS/commit-fixes.sh" <<< "$findings" 2> "$STATE/.commit-log"); then
+              echo "$sha" > "$STATE/.pushed"
+              echo "Pushed the fixes as $sha"
+            else
+              echo "::notice::No fixes pushed: $(tr '\n' ' ' < "$STATE/.commit-log")"
+            fi
+          elif jq -e 'any(.[]; type == "object" and .outcome == "fixed")' <<< "$findings" > /dev/null 2>&1; then
+            echo "::warning::Skipping fix push in fallback step because Claude's App token is no longer available (set github-token to allow fallback pushes). Marking fixed findings as skipped."
+            findings=$(jq -c 'map(if type == "object" and .outcome == "fixed" then .outcome = "skipped" else . end)' <<< "$findings")
+          fi
+        fi
         if [ -f "$STATE/.pushed" ]; then
           FIXED_IN=$(cat "$STATE/.pushed")
           export FIXED_IN
         fi
-        if [ -z "$EXECUTION_FILE" ] || [ ! -f "$EXECUTION_FILE" ]; then
-          echo "The session left no execution file: it didn't run."
-          "$TOOLS/post-review.sh" "$PR_NUMBER" < /dev/null
-          exit 0
-        fi
-        jq -r '[.[] | select(.type == "result")] | last | .result // ""' "$EXECUTION_FILE" |
-          python3 "$TOOLS/extract-findings.py" |
-          "$TOOLS/post-review.sh" "$PR_NUMBER"
 
-    # What the run cost, as one comment on the pull request: the total Claude Code reports in the
-    # session's result (post-cost.sh), the review and its fix commit together, since they are one
-    # session. The session is over, so it posts with the workflow's token, and it never fails the run.
-    - name: Comment what the review cost
-      if: ${{ !cancelled() && steps.event.outputs.review == 'true' && inputs.cost == 'true' }}
+        PROVIDER_WARNINGS="$provider_warnings" "$TOOLS/post-review.sh" "$PR_NUMBER" <<< "$findings"
+
+    - id: summary
+      name: Comment what the review cost and took
+      if: ${{ !cancelled() && steps.event.outputs.review == 'true' && steps.tools.outputs.dir != '' }}
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
-        EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+        CLAUDE_EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+        GEMINI_EXECUTION_FILE: ${{ steps.tools.outputs.state }}/gemini-execution.json
         FIX: ${{ inputs.fix }}
-        OAUTH: ${{ inputs.oauth-token != '' }}
+        CLAUDE_OAUTH: ${{ inputs.claude-oauth-token != '' }}
+        SHOW_MICRO_COSTS: ${{ inputs.show-micro-costs }}
+        POST_COST: ${{ inputs.cost }}
         STATE: ${{ steps.tools.outputs.state }}
-        MODEL: ${{ inputs.model }}
-        EFFORT: ${{ inputs.effort }}
-      run: '"$GITHUB_ACTION_PATH/post-cost.sh" "$PR_NUMBER"'
+        PROVIDERS: ${{ steps.config.outputs.providers }}
+        CLAUDE_MODEL: ${{ steps.config.outputs.claude-model }}
+        CLAUDE_EFFORT: ${{ steps.config.outputs.claude-effort }}
+        GEMINI_MODEL: ${{ steps.config.outputs.gemini-model }}
+        GEMINI_EFFORT: ${{ steps.config.outputs.gemini-effort }}
+      run: |
+        "${{ steps.tools.outputs.dir }}/post-cost.sh" "$PR_NUMBER"
+        if [ -f "$STATE/summary.json" ]; then
+          {
+            echo "total-duration-seconds=$(jq -r '.total_duration_seconds // 0' "$STATE/summary.json")"
+            echo "provider-durations=$(jq -c '.provider_durations // {}' "$STATE/summary.json")"
+            echo "total-cost-usd=$(jq -r '.total_cost_usd // ""' "$STATE/summary.json")"
+          } >> "$GITHUB_OUTPUT"
+        else
+          {
+            echo "total-duration-seconds=0"
+            echo "provider-durations={}"
+            echo "total-cost-usd="
+          } >> "$GITHUB_OUTPUT"
+        fi
 
-    # The action hides Claude's output, since the reviewed repository's logs may be public, so a tool
-    # the review was denied doesn't show anywhere. Only the tool's name is printed, and for Bash the
-    # program (a path to a script counts), its flags and its subcommand (two for gh, whose verbs come
-    # in pairs), enough to allow it above: a word that doesn't look like one (a path argument, a
-    # value, an assignment) is left out. A compound command (&&, ||, |, ;) is denied as a whole when one of its
-    # parts isn't allowed, so every part is printed, joined with "+". A command the Bash guard refused
-    # never reaches the permission rules, so it is in the guard's log instead, in the same shape, and
-    # goes through the review's mask, since a refused command's first word could be anything. Reading
-    # either never fails the review.
     - name: List the tools the review was denied
       if: always() && steps.tools.outputs.dir != ''
       shell: bash
@@ -642,8 +871,8 @@ runs:
       run: |
         if [ -f "$STATE/.guard-log" ]; then
           "$TOOLS/post-review.sh" --redact < "$STATE/.guard-log" | sort | uniq -c | while read -r count tool; do
-            echo "::warning::The review's Bash guard refused $tool ($count time(s))."
-          done || echo "::warning::Couldn't read the commands the Bash guard refused."
+            echo "::warning::The review's guard refused $tool ($count time(s))."
+          done || echo "::warning::Couldn't read the commands the guard refused."
         fi
         [ -n "$EXECUTION_FILE" ] && [ -f "$EXECUTION_FILE" ] || exit 0
         if ! denied=$(jq -r '.[] | select(.type == "result") | .permission_denials[]?
@@ -665,3 +894,20 @@ runs:
         sort <<< "$denied" | uniq -c | while read -r count tool; do
           echo "::warning::The review was denied $tool ($count time(s))."
         done
+
+    - name: Fail when every enabled provider failed
+      if: ${{ !cancelled() && steps.event.outputs.review == 'true' }}
+      shell: bash
+      env:
+        RUN_CLAUDE: ${{ steps.config.outputs.run-claude }}
+        RUN_GEMINI: ${{ steps.config.outputs.run-gemini }}
+        CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
+        GEMINI_OUTCOME: ${{ steps.gemini.outcome }}
+      run: |
+        any_ok=false
+        [ "$RUN_GEMINI" = true ] && [ "$GEMINI_OUTCOME" = success ] && any_ok=true
+        [ "$RUN_CLAUDE" = true ] && [ "$CLAUDE_OUTCOME" = success ] && any_ok=true
+        if [ "$any_ok" != true ]; then
+          echo "::error::Every enabled AI review provider failed."
+          exit 1
+        fi

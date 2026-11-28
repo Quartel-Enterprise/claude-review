@@ -1,37 +1,18 @@
-name: 'Claude review gate'
-description: "Waits for the opening Claude review of a pull request's commit, and tells whether the checks should run on it"
-
-# The first step of the job the pull request's check workflows start with: when the pull request has
-# just opened, or a draft was just marked ready for review, it waits for the review to finish on the
-# same commit before they run. The review applies its findings and pushes them as a commit of its
-# own, and running the checks on a commit about to be replaced would only have them run twice.
-# When the review pushed, the pull request's head is no longer this commit: proceed is 'false', and
-# the checks run on the new commit, whose push starts them again.
-#
-# The review's own push (its bot user's fix commit) runs the gate too, waiting for that same review
-# run. On either commit, once the review ends, proceed is 'false' while a thread the review opened is
-# still unresolved, and open-threads says how many: the caller's next step fails then (its name is
-# the hold-step of the threads action), so the pull request shows why nothing ran instead of skipped
-# checks that look green. Resolving the threads without a push starts no workflow: the threads
-# action's rerun-held re-runs the held runs.
-#
-# A draft or a fork's pull request, which the review skips, passes right away. The step itself never
-# fails: a failed or cancelled review, one that outlasts the wait, or GitHub's API failing a few
-# times in a row lets the checks run.
+name: 'AI review gate'
+description: "Waits for the opening AI review of a pull request's commit, and tells whether the checks should run on it"
 
 inputs:
+  bot-login:
+    description: "The login of the bot user the review posts as and pushes its fixes as (e.g. claude[bot], github-actions[bot], or your GitHub App's bot). Required."
+    required: true
   review-workflow:
     description: "The path of the workflow that runs the opening review."
     required: false
-    default: '.github/workflows/claude-review.yml'
+    default: '.github/workflows/ai-review.yml'
   wait-minutes:
     description: "How long to wait for the review before letting the checks run. Keep it a few minutes under the job's timeout-minutes, or a stuck review gets the job cancelled instead."
     required: false
     default: '40'
-  bot-login:
-    description: "The login of the bot user the review posts as and pushes its fixes as: the review action's bot-login."
-    required: false
-    default: 'claude[bot]'
   token:
     description: 'A token that reads actions and pull requests.'
     required: false
@@ -52,6 +33,7 @@ runs:
         GH_TOKEN: ${{ inputs.token }}
         GH_REPO: ${{ github.repository }}
         REVIEW_WORKFLOW: ${{ inputs.review-workflow }}
+        BOT_LOGIN: ${{ inputs.bot-login }}
         REVIEWED: >-
           ${{ !github.event.pull_request.draft &&
           github.event.pull_request.head.repo.full_name == github.repository }}
@@ -68,16 +50,14 @@ runs:
           echo "proceed=$1" >> "$GITHUB_OUTPUT"
           exit 0
         }
+        if ! [[ "$BOT_LOGIN" =~ ^[A-Za-z0-9-]+\[bot\]$ ]]; then
+          echo "::error::bot-login '$BOT_LOGIN' isn't a bot user's login, such as claude[bot] or github-actions[bot]."
+          exit 1
+        fi
         if [ "$REVIEWED" != true ]; then
           proceed true
         fi
 
-        # Every workflow of the same event is created together, so the review's run shows up within
-        # seconds; a minute of retries covers a slow API. A draft marked ready may already have review
-        # runs on its commit: the one its opening as a draft skipped, or an earlier review when it was
-        # marked ready before. Either would let the checks through before the new review ends, so on
-        # that event only a run created with this one counts (a re-run keeps its run's creation
-        # time), and never a skipped one.
         since=""
         if [ "$EVENT_ACTION" = ready_for_review ]; then
           created=$(gh api "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID" --jq .created_at 2> /dev/null) || created=""
@@ -94,10 +74,6 @@ runs:
           sleep 10
         done
         if [ -z "$run" ]; then
-          # A review-workflow that names no workflow of the repository finds no run on any commit, and
-          # would let every check through with only the notice below. The Actions API lists the
-          # workflows with the gate's actions: read, where the file's contents would need contents:
-          # read; a failed listing warns nothing.
           if known=$(gh api --paginate "repos/$GH_REPO/actions/workflows?per_page=100" \
             --jq ".workflows[] | select(.path == \"$REVIEW_WORKFLOW\" and .state != \"deleted\") | .id" \
             2> /dev/null) && [ -z "$known" ]; then
@@ -107,11 +83,6 @@ runs:
           proceed true
         fi
 
-        # Once a minute: several workflows wait on the same review, all on GITHUB_TOKEN's 1,000
-        # requests an hour, and the review takes many minutes. Its fix commit is pushed seconds before
-        # it ends, so on that commit the wait is short and polled every 10 seconds. The deadline
-        # (wait-minutes) stays under the job's timeout, so a review stuck in the queue still lets the
-        # checks run.
         interval=60
         if [ "$EVENT_ACTION" = synchronize ]; then
           interval=10
@@ -137,7 +108,6 @@ runs:
           proceed true
         fi
 
-        # The review pushes its fixes before its run completes, so a moved head is already visible.
         head=$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER" --jq .head.sha 2> /dev/null) || head=""
         if [ -n "$head" ] && [ "$head" != "$HEAD_SHA" ]; then
           echo "::notice::The pull request's head moved to $head during the review, so the checks run there instead."
@@ -146,7 +116,6 @@ runs:
 
         echo "count-threads=true" >> "$GITHUB_OUTPUT"
 
-    # The review posts its threads before its run completes, like its fixes.
     - id: threads
       if: steps.review.outputs.count-threads == 'true'
       shell: bash
@@ -156,7 +125,7 @@ runs:
         PR_NUMBER: ${{ github.event.pull_request.number }}
         BOT_LOGIN: ${{ inputs.bot-login }}
       run: |
-        if ! open=$("$GITHUB_ACTION_PATH/../threads/review_gate.sh" open-threads "$PR_NUMBER" --claude 2> /dev/null); then
+        if ! open=$("$GITHUB_ACTION_PATH/../threads/review_gate.sh" open-threads "$PR_NUMBER" --review-only 2> /dev/null); then
           echo "::warning::The review's threads couldn't be read, so the checks run without checking them."
           echo "proceed=true" >> "$GITHUB_OUTPUT"
           exit 0
