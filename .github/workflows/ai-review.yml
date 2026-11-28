@@ -1,4 +1,4 @@
-name: claude-review
+name: ai-review
 on:
   pull_request:
     types:
@@ -43,6 +43,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: Quartel-Enterprise/claude-review/review@1.5.0
+      - uses: Quartel-Enterprise/ai-review/review@2.1.0
         with:
-          oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          providers: claude
+          claude-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
